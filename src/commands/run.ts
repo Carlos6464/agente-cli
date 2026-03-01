@@ -2,102 +2,112 @@ import chalk from 'chalk'
 import ora   from 'ora'
 const inquirer  = require('inquirer')
 const { spawn } = require('child_process')
-import { Command } from 'commander'
-
+const fs        = require('fs')
+const path      = require('path')
+import { Command }   from 'commander'
 import { loadConfig, hasConfig } from './init'
 import { OllamaProvider }        from '../providers/ollama.provider'
-import { buildContext }          from '../core/context-builder/context-builder'
+import { LLMMessage }            from '../providers/llm-provider.interface'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AGENT RUN
+// AGENT RUN — zero conhecimento embutido
 //
-// Executa tarefas do projeto com seleção interativa.
-// Quando ocorre um erro, analisa com o LLM e sugere correção.
+// Responsabilidade do TypeScript: ler arquivos do disco e rodar comandos.
+// Responsabilidade do LLM: entender as ferramentas, versões e descobrir comandos.
 //
-// Fluxo:
-//   1. Carrega .agent/config.json
-//   2. Pergunta qual tarefa executar (build, test, lint, db, deploy, custom)
-//   3. Se monorepo, pergunta qual app
-//   4. Mostra o comando que será executado e pede confirmação
-//   5. Executa com output em tempo real
-//   6. Se erro → analisa com LLM e exibe sugestão de correção
+// Este arquivo não sabe nada sobre turborepo, nx, pnpm, yarn, prisma,
+// docker, ou qualquer outra ferramenta. O LLM descobre tudo lendo
+// os arquivos reais do projeto.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Tarefas pré-definidas por categoria
-const TASK_CATEGORIES = [
-  { name: '🏗️  Build',                    value: 'build'  },
-  { name: '🧪 Test',                      value: 'test'   },
-  { name: '🔍 Lint / Format',             value: 'lint'   },
-  { name: '🗄️  Database (migrate/seed)',  value: 'db'     },
-  { name: '🚀 Deploy',                    value: 'deploy' },
-  { name: '✏️  Custom (digitar comando)', value: 'custom' },
-]
+// Lê todos os arquivos de configuração relevantes do projeto e retorna
+// como string para o LLM analisar. Sem interpretar o conteúdo.
+function readProjectFiles(projectRoot: string): { name: string; content: string }[] {
+  const result: { name: string; content: string }[] = []
 
-// Comandos padrão por categoria e package manager
-const DEFAULT_COMMANDS: Record<string, Record<string, string>> = {
-  build: {
-    npm:  'npm run build',
-    yarn: 'yarn build',
-    pnpm: 'pnpm build',
-  },
-  test: {
-    npm:  'npm test',
-    yarn: 'yarn test',
-    pnpm: 'pnpm test',
-  },
-  lint: {
-    npm:  'npm run lint',
-    yarn: 'yarn lint',
-    pnpm: 'pnpm lint',
-  },
-  db: {
-    npm:  'npm run db:migrate',
-    yarn: 'yarn db:migrate',
-    pnpm: 'pnpm db:migrate',
-  },
-  deploy: {
-    npm:  'npm run deploy',
-    yarn: 'yarn deploy',
-    pnpm: 'pnpm deploy',
-  },
+  // Lê recursivamente até 2 níveis de profundidade procurando configs
+  const scan = (dir: string, depth: number) => {
+    if (depth > 2) return
+    let entries: string[]
+    try { entries = fs.readdirSync(dir) } catch { return }
+
+    for (const entry of entries) {
+      if (['node_modules', '.git', 'dist', 'build', '.next', 'coverage'].includes(entry)) continue
+      const fullPath = path.join(dir, entry)
+      let stat: any
+      try { stat = fs.statSync(fullPath) } catch { continue }
+
+      if (stat.isDirectory()) {
+        scan(fullPath, depth + 1)
+      } else {
+        // Lê qualquer arquivo que possa ter informação sobre como rodar o projeto
+        const ext = path.extname(entry).toLowerCase()
+        const relevant = [
+          '.json', '.yaml', '.yml', '.toml', '.ini', '.conf',
+          'Makefile', 'Dockerfile', '.env.example', 'Procfile', 'justfile'
+        ]
+        const isRelevant = relevant.some(r => entry.endsWith(r) || entry === r)
+        if (!isRelevant) continue
+
+        try {
+          const content = fs.readFileSync(fullPath, 'utf-8') as string
+          const relative = fullPath.replace(projectRoot + path.sep, '')
+          result.push({ name: relative, content: content.slice(0, 3000) })
+        } catch {}
+      }
+    }
+  }
+
+  scan(projectRoot, 0)
+  return result
 }
 
-// Ajusta comando para monorepo (turborepo/nx/lerna)
-function adjustForMonorepo(
-  command:  string,
-  monorepo: string,
-  pkgMgr:   string,
-  app?:     string
-): string {
-  if (!app) return command
+// Pede ao LLM para descobrir o comando lendo os arquivos reais
+async function askLLMForCommand(
+  intent:      string,
+  files:       { name: string; content: string }[],
+  config:      any
+): Promise<string | null> {
 
-  // Extrai só a tarefa (build, test, lint...)
-  const taskMatch = command.match(/(?:run\s+)?(\w+)$/)
-  const task = taskMatch ? taskMatch[1] : command
+  const filesContext = files
+    .map(f => `### ${f.name}\n\`\`\`\n${f.content}\n\`\`\``)
+    .join('\n\n')
 
-  if (monorepo === 'turborepo') {
-    return `${pkgMgr} turbo run ${task} --filter=${app}`
-  }
-  if (monorepo === 'nx') {
-    return `npx nx run ${app}:${task}`
-  }
-  if (monorepo === 'lerna') {
-    return `npx lerna run ${task} --scope=${app}`
-  }
+  const messages: LLMMessage[] = [
+    {
+      role: 'system',
+      content: `Você descobre comandos de terminal analisando arquivos de configuração de projetos.
+Responda APENAS com o comando exato e completo, pronto para rodar no terminal.
+Sem explicações, sem markdown, sem aspas. Se não souber, responda: UNKNOWN`
+    },
+    {
+      role: 'user',
+      content: `Projeto: ${config.profile.projectName}
 
-  // Workspaces simples
-  if (pkgMgr === 'pnpm') return `pnpm --filter ${app} run ${task}`
-  if (pkgMgr === 'yarn') return `yarn workspace ${app} run ${task}`
-  return `npm run ${task} --workspace=${app}`
+Arquivos de configuração encontrados no projeto:
+${filesContext}
+
+Com base nesses arquivos, qual é o comando exato para: ${intent}`
+    }
+  ]
+
+  try {
+    const provider = new OllamaProvider(config.ollama.defaultModel, config.ollama.baseUrl)
+    const result   = await provider.complete(messages, { temperature: 0.1 })
+    if (!result.success || !result.content) return null
+    const cmd = result.content.trim()
+    if (cmd === 'UNKNOWN' || cmd.length === 0 || cmd.length > 300) return null
+    return cmd
+  } catch {
+    return null
+  }
 }
 
-export async function runRun(options: { app?: string; projectRoot?: string } = {}) {
+export async function runRun(options: { projectRoot?: string } = {}) {
   const projectRoot = options.projectRoot || process.cwd()
 
   console.log('')
   console.log(chalk.bold.cyan('  🔧 Agent Run\n'))
-
-  // ── 1. Carrega config ──────────────────────────────────────────────────────
 
   if (!hasConfig(projectRoot)) {
     console.log(chalk.red('  ❌ Projeto não inicializado.'))
@@ -105,215 +115,151 @@ export async function runRun(options: { app?: string; projectRoot?: string } = {
     process.exit(1)
   }
 
-  const config  = loadConfig(projectRoot)!
-  const profile = config.profile
-  const pkgMgr  = profile.packageManager === 'unknown' ? 'npm' : profile.packageManager
+  const config = loadConfig(projectRoot)!
 
-  // ── 2. Seleciona categoria da tarefa ───────────────────────────────────────
+  // ── Lê os scripts diretos (sem interpretar) ────────────────────────────────
 
-  const { category } = await inquirer.prompt([{
-    type:    'list',
-    name:    'category',
-    message: 'O que você quer executar?',
-    choices: TASK_CATEGORIES,
-  }])
+  const directScripts: { label: string; command: string }[] = []
 
-  // ── 3. Seleciona app (se monorepo e não passado via flag) ─────────────────
+  // package.json — lê scripts como estão, sem transformar
+  const pkgPath = path.join(projectRoot, 'package.json')
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+      // Detecta o package manager lendo os lock files — sem assumir nada
+      let pm = 'npm'
+      if (fs.existsSync(path.join(projectRoot, 'pnpm-lock.yaml'))) pm = 'pnpm'
+      else if (fs.existsSync(path.join(projectRoot, 'yarn.lock')))  pm = 'yarn'
+      else if (fs.existsSync(path.join(projectRoot, 'bun.lockb')))  pm = 'bun'
 
-  let targetApp = options.app
-
-  if (profile.monorepo !== 'none' && profile.apps.length > 0 && !targetApp) {
-    const { selectedApp } = await inquirer.prompt([{
-      type:    'list',
-      name:    'selectedApp',
-      message: 'Qual app?',
-      choices: [
-        { name: '(todos os apps)', value: '' },
-        ...profile.apps.map(a => ({ name: a, value: a }))
-      ]
-    }])
-    targetApp = selectedApp || undefined
+      for (const name of Object.keys(pkg.scripts || {})) {
+        directScripts.push({ label: name, command: `${pm} run ${name}` })
+      }
+    } catch {}
   }
 
-  // ── 4. Monta o comando ────────────────────────────────────────────────────
+  // Makefile — targets diretos
+  const makefilePath = path.join(projectRoot, 'Makefile')
+  if (fs.existsSync(makefilePath)) {
+    try {
+      const content = fs.readFileSync(makefilePath, 'utf-8') as string
+      const targets = (content.match(/^([a-zA-Z][a-zA-Z0-9_-]*):/gm) || [])
+        .map((t: string) => t.replace(':', ''))
+      for (const name of targets) {
+        directScripts.push({ label: `make ${name}`, command: `make ${name}` })
+      }
+    } catch {}
+  }
+
+  const choices = [
+    ...directScripts.map(s => ({ name: s.label, value: s.command })),
+    new inquirer.Separator(),
+    { name: chalk.cyan('💡 Descrever o que quero fazer (LLM descobre o comando)'), value: '__describe__' },
+    { name: '✏️  Digitar manualmente',                                              value: '__manual__'  },
+  ]
+
+  console.log(chalk.gray(`  ${directScripts.length} script(s) disponível(eis)\n`))
+
+  const { selected } = await inquirer.prompt([{
+    type: 'list', name: 'selected',
+    message: 'O que executar?',
+    choices, pageSize: 20
+  }])
 
   let finalCommand = ''
 
-  if (category === 'custom') {
-    const { customCmd } = await inquirer.prompt([{
-      type:    'input',
-      name:    'customCmd',
-      message: 'Digite o comando:',
-      validate: (v: string) => v.trim().length > 0 || 'Comando não pode ser vazio'
+  if (selected === '__manual__') {
+    const { cmd } = await inquirer.prompt([{
+      type: 'input', name: 'cmd', message: 'Comando:',
+      validate: (v: string) => v.trim().length > 0 || 'Não pode ser vazio'
     }])
-    finalCommand = customCmd.trim()
-  } else if (category === 'db') {
-    // Submenu de database
-    const { dbTask } = await inquirer.prompt([{
-      type:    'list',
-      name:    'dbTask',
-      message: 'Qual operação de banco?',
-      choices: [
-        { name: 'Migrate (aplicar migrations)',     value: 'migrate'  },
-        { name: 'Migrate Dev (criar migration)',    value: 'migrate:dev' },
-        { name: 'Seed (popular banco)',             value: 'seed'     },
-        { name: 'Reset (apagar e recriar)',         value: 'reset'    },
-        { name: 'Studio (abrir GUI)',               value: 'studio'   },
-      ]
+    finalCommand = cmd.trim()
+
+  } else if (selected === '__describe__') {
+    const { intent } = await inquirer.prompt([{
+      type: 'input', name: 'intent',
+      message: 'Descreva o que quer fazer:',
+      validate: (v: string) => v.trim().length > 0 || 'Descreva a intenção'
     }])
 
-    // Comandos específicos por ORM
-    if (profile.orm === 'prisma') {
-      const prismaCommands: Record<string, string> = {
-        migrate:     'npx prisma migrate deploy',
-        'migrate:dev': 'npx prisma migrate dev',
-        seed:        `${pkgMgr} run db:seed`,
-        reset:       'npx prisma migrate reset',
-        studio:      'npx prisma studio',
-      }
-      finalCommand = prismaCommands[dbTask] || `${pkgMgr} run db:${dbTask}`
+    const spinner = ora('Lendo o projeto e descobrindo o comando...').start()
+    const files   = readProjectFiles(projectRoot)
+    const cmd     = await askLLMForCommand(intent.trim(), files, config)
+    spinner.stop()
+
+    if (cmd) {
+      console.log(chalk.green(`\n  Comando descoberto: ${chalk.white(cmd)}\n`))
+      finalCommand = cmd
     } else {
-      finalCommand = `${pkgMgr} run db:${dbTask}`
+      console.log(chalk.yellow('\n  Não consegui determinar o comando automaticamente.'))
+      const { manual } = await inquirer.prompt([{
+        type: 'input', name: 'manual', message: 'Digite manualmente:',
+        validate: (v: string) => v.trim().length > 0 || 'Não pode ser vazio'
+      }])
+      finalCommand = manual.trim()
     }
 
-    if (targetApp && profile.monorepo !== 'none') {
-      finalCommand = adjustForMonorepo(finalCommand, profile.monorepo, pkgMgr, targetApp)
-    }
   } else {
-    const baseCommand = DEFAULT_COMMANDS[category]?.[pkgMgr] || `${pkgMgr} run ${category}`
-    finalCommand = targetApp
-      ? adjustForMonorepo(baseCommand, profile.monorepo, pkgMgr, targetApp)
-      : baseCommand
+    finalCommand = selected
   }
 
-  // ── 5. Confirma o comando ─────────────────────────────────────────────────
+  // ── Confirma e executa ────────────────────────────────────────────────────
 
   console.log('')
-  console.log(chalk.bold('  Comando a executar:'))
+  console.log(chalk.bold('  Comando:'))
   console.log(chalk.cyan(`  $ ${finalCommand}\n`))
 
-  const { confirmed } = await inquirer.prompt([{
-    type:    'confirm',
-    name:    'confirmed',
-    message: 'Executar?',
-    default: true
+  const { ok } = await inquirer.prompt([{
+    type: 'confirm', name: 'ok', message: 'Executar?', default: true
   }])
 
-  if (!confirmed) {
-    console.log(chalk.gray('\n  Cancelado.\n'))
-    process.exit(0)
-  }
-
-  // ── 6. Executa o comando ──────────────────────────────────────────────────
+  if (!ok) { console.log(chalk.gray('\n  Cancelado.\n')); process.exit(0) }
 
   console.log('')
-  console.log(chalk.bold.gray(`  Executando: ${finalCommand}\n`))
   console.log(chalk.gray('  ' + '─'.repeat(50)))
-
-  const exitCode = await runCommandLive(finalCommand, projectRoot)
-
+  const exitCode = await runLive(finalCommand, projectRoot)
   console.log(chalk.gray('  ' + '─'.repeat(50) + '\n'))
 
-  // ── 7. Analisa erro se houver ─────────────────────────────────────────────
-
   if (exitCode !== 0) {
-    console.log(chalk.red(`  ❌ Comando falhou com código ${exitCode}\n`))
-
+    console.log(chalk.red(`  ❌ Falhou (código ${exitCode})\n`))
     const { analyze } = await inquirer.prompt([{
-      type:    'confirm',
-      name:    'analyze',
-      message: 'Analisar o erro com o LLM?',
-      default: true
+      type: 'confirm', name: 'analyze', message: 'Analisar o erro com LLM?', default: true
     }])
-
     if (analyze) {
-      await analyzeError(finalCommand, exitCode, config)
+      const spinner  = ora('Analisando...').start()
+      const files    = readProjectFiles(projectRoot)
+      const filesCtx = files.map(f => `### ${f.name}\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n')
+      const messages: LLMMessage[] = [{
+        role: 'system', content: 'Analise o erro e sugira como corrigir. Seja direto e específico.'
+      }, {
+        role: 'user',
+        content: `Projeto: ${config.profile.projectName}\n\nArquivos de config:\n${filesCtx}\n\nComando que falhou: "${finalCommand}"\nCódigo de saída: ${exitCode}\n\nComo corrigir?`
+      }]
+      const provider = new OllamaProvider(config.ollama.defaultModel, config.ollama.baseUrl)
+      const result   = await provider.complete(messages, { temperature: 0.2 })
+      spinner.stop()
+      if (result.success && result.content) {
+        console.log(chalk.bold('\n  💡 Análise:\n'))
+        console.log(chalk.white('  ' + result.content.replace(/\n/g, '\n  ')))
+        console.log('')
+      }
     }
   } else {
-    console.log(chalk.green('  ✅ Concluído com sucesso!\n'))
+    console.log(chalk.green('  ✅ Concluído!\n'))
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EXECUTA O COMANDO COM OUTPUT EM TEMPO REAL
-// ─────────────────────────────────────────────────────────────────────────────
-
-function runCommandLive(command: string, cwd: string): Promise<number> {
-  return new Promise((resolve) => {
-    const [cmd, ...args] = command.split(' ')
-
-    const proc = spawn(cmd, args, {
-      cwd,
-      stdio: 'inherit',  // herda stdin/stdout/stderr do processo pai
-      shell: true        // permite pipes e comandos compostos
-    })
-
-    proc.on('close', (code: number) => {
-      resolve(code || 0)
-    })
-
-    proc.on('error', (err: Error) => {
-      console.log(chalk.red(`\n  Erro ao executar: ${err.message}`))
-      resolve(1)
-    })
+function runLive(command: string, cwd: string): Promise<number> {
+  return new Promise(resolve => {
+    const proc = spawn(command, [], { cwd, stdio: 'inherit', shell: true })
+    proc.on('close', (code: number) => resolve(code || 0))
+    proc.on('error', (err: Error) => { console.log(chalk.red(`\n  ${err.message}`)); resolve(1) })
   })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ANALISA O ERRO COM O LLM
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function analyzeError(
-  command:  string,
-  exitCode: number,
-  config:   any
-): Promise<void> {
-  const spinner = ora('Analisando erro com o LLM...').start()
-
-  try {
-    const provider = new OllamaProvider(config.ollama.defaultModel, config.ollama.baseUrl)
-
-    const contextResult = await buildContext({
-      instruction: `O comando "${command}" falhou com código ${exitCode}. Analise o provável erro e sugira como corrigir. Seja específico e direto.`,
-      profile:     config.profile,
-      mode:        'run',
-      topK:        3
-    })
-
-    if (!contextResult.success || !contextResult.messages) {
-      spinner.fail('Não foi possível montar o contexto')
-      return
-    }
-
-    const result = await provider.complete(contextResult.messages, { temperature: 0.2 })
-
-    spinner.stop()
-
-    if (result.success && result.content) {
-      console.log(chalk.bold('\n  💡 Análise do LLM:\n'))
-      console.log(chalk.white('  ' + result.content.replace(/\n/g, '\n  ')))
-      console.log('')
-    } else {
-      spinner.fail(`Erro na análise: ${result.error}`)
-    }
-  } catch (err) {
-    spinner.fail(`Erro: ${(err as Error).message}`)
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// COMMANDER WRAPPER
-// ─────────────────────────────────────────────────────────────────────────────
-
 export function runCommand(): Command {
-  const command = new Command('run')
-
-  command
-    .description('Executa tarefas do projeto com seleção interativa')
-    .option('--app <app>', 'App alvo dentro do monorepo (ex: api, web, mobile)')
-    .action(async (options: { app?: string }) => {
-      await runRun({ app: options.app })
-    })
-
-  return command
+  const cmd = new Command('run')
+  cmd.description('Executa scripts do projeto — o LLM descobre comandos lendo os arquivos reais')
+     .action(async () => { await runRun() })
+  return cmd
 }
