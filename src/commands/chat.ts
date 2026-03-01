@@ -9,22 +9,13 @@ import { loadConfig, hasConfig }         from './init'
 import { OllamaProvider }                from '../providers/ollama.provider'
 import { buildContext }                  from '../core/context-builder/context-builder'
 import { LLMMessage }                    from '../providers/llm-provider.interface'
+import { runAgent }                      from '../core/agent/agent-core' // <-- NOVO IMPORT
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT CHAT
-//
-// Conversa livre com o agente no contexto do projeto.
-// Mantém histórico da sessão em memória e persiste no disco.
-//
-// Funcionalidades:
-//   - Streaming da resposta em tempo real (igual ao ChatGPT)
-//   - Histórico da conversa em memória (o LLM "lembra" do que foi dito)
-//   - Contexto do RAG injetado em cada mensagem
-//   - Histórico persistido em .agent/history.json
-//   - Comandos especiais: /sair, /limpar, /historico, /ajuda
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MAX_HISTORY_MESSAGES = 20   // máximo de mensagens mantidas em memória
+const MAX_HISTORY_MESSAGES = 20
 const HISTORY_FILE         = '.agent/history.json'
 
 interface ChatMessage {
@@ -69,9 +60,8 @@ export async function runChat(options: { projectRoot?: string } = {}) {
   // ── 3. Carrega histórico ───────────────────────────────────────────────────
 
   const history = loadHistory(projectRoot)
-  const sessionMessages: LLMMessage[] = []  // histórico da sessão em memória
+  const sessionMessages: LLMMessage[] = []
 
-  // Exibe informações do projeto
   console.log(chalk.gray(`\n  Projeto: ${chalk.white(profile.projectName)}`))
   console.log(chalk.gray(`  Stack:   ${chalk.white([profile.language, profile.backend !== 'none' ? profile.backend : '', profile.frontend !== 'none' ? profile.frontend : ''].filter(Boolean).join(' + '))}`))
 
@@ -80,7 +70,7 @@ export async function runChat(options: { projectRoot?: string } = {}) {
   }
 
   console.log('')
-  console.log(chalk.gray('  Comandos: /sair  /limpar  /historico  /ajuda'))
+  console.log(chalk.gray('  Comandos: /sair  /limpar  /historico  /ajuda  /agir'))
   console.log(chalk.gray('  ' + '─'.repeat(50)))
   console.log('')
 
@@ -131,13 +121,76 @@ export async function runChat(options: { projectRoot?: string } = {}) {
       return
     }
 
-    // ── Processa mensagem do usuário ─────────────────────────────────────────
+    // ── NOVO COMANDO: MODO AÇÃO (/agir) ──────────────────────────────────────
+    if (userInput.startsWith('/agir ') || userInput.startsWith('/gerar ')) {
+      const instruction = userInput.replace(/^\/(agir|gerar)\s+/, '').trim()
+      
+      rl.pause()
+      console.log(chalk.blue('\n  🚀 Iniciando modo de ação autônoma...\n'))
+      const actSpinner = ora('Pensando e agindo...').start()
+
+      try {
+        // Envia a instrução somada ao contexto do histórico da sessão
+        const contextualInstruction = `Considerando a conversa até aqui, faça o seguinte: ${instruction}`
+
+        const result = await runAgent({
+          instruction: contextualInstruction,
+          profile,
+          projectRoot,
+          baseUrl: config.ollama.baseUrl,
+          mode: 'generate', // Usa o modo generate para liberar as tools (write_file, etc)
+          maxSteps: 20,
+          onStep: (step) => {
+            if (step.type === 'thinking') {
+              actSpinner.text = `Pensando... (${step.content})`
+            }
+            if (step.type === 'tool_call') {
+              const tool = step.tool || ''
+              if (tool === 'write_file') {
+                const match = step.content.match(/write_file\(.*?"path":"([^"]+)"/)
+                const filePath = match ? match[1] : 'arquivo'
+                actSpinner.text = `Criando ${filePath}...`
+              } else if (tool === 'read_file') {
+                actSpinner.text = `Lendo referências...`
+              }
+            }
+          }
+        })
+
+        actSpinner.stop()
+
+        if (result.success) {
+          console.log(chalk.green(`\n  agente › ${result.response}\n`))
+
+          if (result.files && result.files.length > 0) {
+            console.log(chalk.bold.green('  ✅ Arquivos criados/modificados:'))
+            result.files.forEach(f => console.log(chalk.white(`    + ${f}`)))
+            console.log('')
+          }
+
+          // Salva no histórico para que o chat normal lembre do que foi feito
+          sessionMessages.push({ role: 'user', content: userInput })
+          sessionMessages.push({ role: 'assistant', content: `Arquivos gerados/modificados. Resumo: ${result.response}` })
+        } else {
+          console.log(chalk.red(`\n  ❌ Erro: ${result.error}\n`))
+        }
+
+      } catch (err) {
+        actSpinner.stop()
+        console.log(chalk.red(`\n  Erro: ${(err as Error).message}\n`))
+      }
+
+      rl.resume()
+      rl.prompt()
+      return
+    }
+
+    // ── Processa mensagem do usuário (Modo Padrão / Stream) ──────────────────
 
     rl.pause()
     console.log('')
 
     try {
-      // Monta o contexto com RAG para essa mensagem
       const contextResult = await buildContext({
         instruction: userInput,
         profile,
@@ -154,22 +207,16 @@ export async function runChat(options: { projectRoot?: string } = {}) {
         return
       }
 
-      // Monta as mensagens para o LLM:
-      // system prompt do context builder + histórico da sessão + mensagem atual
       const systemMsg  = contextResult.messages.find(m => m.role === 'system')!
       const userMsg    = contextResult.messages.find(m => m.role === 'user')!
 
       const messagesForLLM: LLMMessage[] = [
         systemMsg,
-        // Injeta histórico da sessão (sem o system prompt — só user/assistant)
         ...sessionMessages.slice(-MAX_HISTORY_MESSAGES),
         userMsg
       ]
 
-      // Adiciona mensagem do usuário ao histórico da sessão
       sessionMessages.push({ role: 'user', content: userInput })
-
-      // ── Streaming da resposta ──────────────────────────────────────────────
 
       process.stdout.write(chalk.bold.green('  agente › '))
 
@@ -183,7 +230,6 @@ export async function runChat(options: { projectRoot?: string } = {}) {
 
       console.log('\n')
 
-      // Adiciona resposta do agente ao histórico da sessão
       sessionMessages.push({ role: 'assistant', content: fullResponse })
 
     } catch (err) {
@@ -200,7 +246,6 @@ export async function runChat(options: { projectRoot?: string } = {}) {
     process.exit(0)
   })
 
-  // Ctrl+C limpo
   process.on('SIGINT', () => {
     saveHistory(projectRoot, history, sessionMessages)
     console.log(chalk.gray('\n\n  Histórico salvo. Até logo!\n'))
@@ -233,19 +278,15 @@ function saveHistory(
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 
-    // Converte mensagens da sessão para o formato de histórico
     const newMessages: ChatMessage[] = sessionMessages.map(m => ({
       role:      m.role as 'user' | 'assistant',
       content:   m.content,
       timestamp: new Date().toISOString()
     }))
 
-    // Mantém apenas as últimas 100 mensagens no histórico persistido
     const allMessages = [...existing, ...newMessages].slice(-100)
     fs.writeFileSync(historyPath, JSON.stringify(allMessages, null, 2), 'utf-8')
-  } catch {
-    // Silencia erro de escrita
-  }
+  } catch {}
 }
 
 function clearHistory(projectRoot: string): void {
@@ -287,27 +328,17 @@ function printHelp(): void {
   console.log(chalk.white('  /sair      ') + chalk.gray('Encerra o chat e salva histórico'))
   console.log(chalk.white('  /limpar    ') + chalk.gray('Limpa o histórico da sessão e do disco'))
   console.log(chalk.white('  /historico ') + chalk.gray('Exibe mensagens da sessão atual'))
+  console.log(chalk.white('  /agir      ') + chalk.gray('Usa o LLM de forma autônoma para criar e modificar arquivos (Ex: /agir Crie o model X)'))
   console.log(chalk.white('  /ajuda     ') + chalk.gray('Exibe esta mensagem'))
-  console.log('')
-  console.log(chalk.gray('  Dicas:'))
-  console.log(chalk.gray('  • Pergunte sobre qualquer parte do código do projeto'))
-  console.log(chalk.gray('  • Peça para explicar, refatorar ou revisar código'))
-  console.log(chalk.gray('  • O agente usa o RAG para buscar contexto relevante automaticamente'))
   console.log('')
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// COMMANDER WRAPPER
-// ─────────────────────────────────────────────────────────────────────────────
-
 export function chatCommand(): Command {
   const command = new Command('chat')
-
   command
     .description('Inicia uma conversa com o agente no contexto do projeto atual')
     .action(async () => {
       await runChat()
     })
-
   return command
 }

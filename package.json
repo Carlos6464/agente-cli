@@ -5,6 +5,10 @@
   "bin": {
     "agent": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "dev": "node -r ts-node/register src/index.ts",
     "dev:test": "node -r ts-node/register src/test-filesystem.ts",

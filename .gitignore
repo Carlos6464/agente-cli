@@ -2,4 +2,5 @@
 
 # Agent CLI
 .agent/
+dist/
 node_modules
