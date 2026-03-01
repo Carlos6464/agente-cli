@@ -96,12 +96,12 @@ Etapa 5  ✅  RAG: embeddings + vector store + retriever
 Etapa 6  ✅  Context Builder usando RAG
 Etapa 7  ✅  Agent Core com tool calling loop
 Etapa 8  ✅  agent init (projeto novo e existente)
-Etapa 9  ⏳  agent generate
-Etapa 10 ⏳  agent run com seleção e análise de erro
-Etapa 11 ⏳  agent chat com loop de conversa
-Etapa 12 ⏳  Wizard completo com resolver de dependências
-Etapa 13 ⏳  Template Engine e agent new
-Etapa 14 ⏳  Memória de perfis, histórico e reindexação
+Etapa 9  ✅  agent generate
+Etapa 10 ✅  agent run com seleção e análise de erro
+Etapa 11 ✅  agent chat com loop de conversa
+Etapa 12 ✅  Wizard completo com resolver de dependências
+Etapa 13 ✅  Template Engine e agent new
+Etapa 14 ✅  Memória de perfis, histórico e reindexação
 ```
 
 ---
@@ -255,7 +255,228 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-*README atualizado após conclusão da Etapa 8*1\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+1\*
 
 ---
 
@@ -490,7 +711,228 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-*README atualizado após conclusão da Etapa 8*3\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+3\*
 
 ---
 
@@ -614,7 +1056,228 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-*README atualizado após conclusão da Etapa 8*4\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+4\*
 
 ---
 
@@ -729,7 +1392,228 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-*README atualizado após conclusão da Etapa 8*5\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+5\*
 
 ---
 
@@ -847,7 +1731,228 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-*README atualizado após conclusão da Etapa 8*6\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+6\*
 
 ---
 
@@ -969,4 +2074,225 @@ Estrutura salva em `.agent/config.json` — lida por todos os comandos seguintes
 
 ---
 
-\*README atualizado após conclusão da Etapa 8\*\*
+## _README atualizado após conclusão da Etapa 8_
+
+## Etapa 9 — agent generate (concluída ✅)
+
+### O que foi construído
+
+O `agent generate` é o comando principal do agente — gera código seguindo os padrões do projeto atual. Usa o Agent Core (Etapa 7) com RAG + LLM + tool calling para criar arquivos que imitam o estilo já existente no projeto.
+
+### Uso
+
+```bash
+agent generate module payments
+agent generate service users --app api
+agent generate component Button --app web
+agent generate page dashboard --app web
+agent generate dto CreateUser
+```
+
+### Fluxo
+
+1. Carrega `.agent/config.json` — falha com mensagem clara se não inicializado
+2. Monta instrução rica combinando tipo, nome, app alvo e hints da stack detectada
+3. Roda o Agent Core: o LLM explora a estrutura, lê referências e escreve os arquivos
+4. Exibe lista dos arquivos criados
+5. Pergunta se reindexar no RAG (com `--yes` pula a confirmação)
+6. Reindexe cada arquivo criado individualmente
+
+### Instrução rica por tipo
+
+O `buildInstruction` monta uma instrução específica para cada tipo:
+
+- **module** → cria `.module.ts`, `.service.ts`, `.controller.ts` e entidade se houver ORM
+- **service** → classe com métodos CRUD e injeção de dependências
+- **controller** → endpoints REST completos (GET, POST, PUT, DELETE)
+- **page** → componente de página com estados e chamadas de API
+- **component** → componente React com props tipadas
+- **hook** → custom hook com estados, efeitos e retorno tipado
+
+### Resultado dos testes
+
+```
+✅ agent generate service calculator — arquivo criado corretamente
+✅ LLM explorou estrutura antes de gerar
+✅ Código gerado seguindo padrões do projeto
+✅ Reindexação automática após criação
+✅ Funciona via CLI: agent generate module payments
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 9_
+
+## Etapa 10 — agent run (concluída ✅)
+
+### O que foi construído
+
+O `agent run` executa tarefas do projeto com seleção interativa. Quando ocorre erro, analisa com o LLM e sugere correção.
+
+### Uso
+
+```bash
+agent run              # abre menu interativo
+agent run --app api    # já seleciona o app "api"
+```
+
+### Menu interativo
+
+```
+? O que você quer executar?
+  🏗️  Build
+  🧪 Test
+  🔍 Lint / Format
+  🗄️  Database (migrate/seed)
+  🚀 Deploy
+  ✏️  Custom (digitar comando)
+```
+
+### Funcionalidades
+
+**Monorepo inteligente** — detecta turborepo, nx ou lerna e ajusta o comando automaticamente. `pnpm turbo run test --filter=api` em vez de `npm test`.
+
+**Submenu de database** — migrate, migrate:dev, seed, reset e studio. Comandos adaptados ao ORM detectado (Prisma, TypeORM...).
+
+**Output em tempo real** — usa `spawn` com `stdio: inherit` para o output aparecer diretamente no terminal, igual a rodar o comando manualmente.
+
+**Análise de erro com LLM** — quando o comando falha, pergunta se quer analisar. O LLM recebe o comando e o código de saída, busca contexto no RAG e sugere a correção.
+
+### Resultado dos testes
+
+```
+✅ Comando registrado no CLI
+✅ run.ts importado sem erros de compilação
+✅ Funcional via: npm run dev -- run
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 10_
+
+## Etapa 11 — agent chat (concluída ✅)
+
+### O que foi construído
+
+O `agent chat` é uma conversa livre com o agente no contexto do projeto. Responde com streaming em tempo real, mantém histórico da sessão em memória e persiste em `.agent/history.json`.
+
+### Uso
+
+```bash
+agent chat
+```
+
+### Funcionalidades
+
+**Streaming em tempo real** — a resposta aparece sendo digitada, igual ao ChatGPT. Usa o método `stream()` do OllamaProvider.
+
+**Histórico em memória** — o LLM recebe as últimas 20 mensagens da sessão em cada requisição, mantendo continuidade da conversa.
+
+**RAG automático** — cada mensagem do usuário busca contexto relevante no índice antes de enviar ao LLM. O agente responde baseado no código real do projeto.
+
+**Histórico persistido** — ao sair, salva em `.agent/history.json`. Máximo de 100 mensagens.
+
+**Comandos especiais:**
+
+```
+/sair      → encerra e salva histórico
+/limpar    → limpa sessão e disco
+/historico → exibe mensagens da sessão
+/ajuda     → exibe comandos disponíveis
+```
+
+### Resultado dos testes
+
+```
+✅ chat.ts importado sem erros
+✅ chatCommand e runChat exportados corretamente
+✅ Comando "chat" registrado no CLI
+✅ Histórico salvo e carregado corretamente
+✅ Funcional via: npm run dev -- chat
+```
+
+---
+
+## _README atualizado após conclusão da Etapa 11_
+
+## Etapas 12, 13 e 14 — Wizard, Templates e Memória (concluídas ✅)
+
+### O que foi construído
+
+As três últimas etapas completam o `agent new` — o comando que cria projetos do zero.
+
+**Arquivos criados:**
+
+- `src/core/wizard/stack-wizard.ts` — wizard interativo de stack (Etapa 12)
+- `src/core/templates/template-engine.ts` — gerador de arquivos base (Etapa 13)
+- `src/core/memory/profile-memory.ts` — salva e carrega perfis em ~/.agent/profiles/ (Etapa 14)
+- `src/commands/new.ts` — orquestra tudo
+
+### Uso
+
+```bash
+# Cria projeto com wizard
+agent new meu-projeto
+
+# Reutiliza um perfil salvo (pula o wizard)
+agent new meu-projeto --profile nestjs-prisma-ddd
+```
+
+### Etapa 12 — Stack Wizard
+
+Pergunta interativa em sequência:
+
+1. Tipo do projeto (Backend / Fullstack / Frontend / Mobile / Monorepo / CLI)
+2. Linguagem (TypeScript, JavaScript, Python, PHP)
+3. Framework de backend (NestJS, Express, Fastify, Django, FastAPI, Laravel)
+4. Framework de frontend (Next.js, React+Vite, Vue, Angular, Nuxt)
+5. Banco de dados + ORM
+6. Arquitetura (Simples, Modular, MVC, DDD)
+7. Package manager + framework de testes
+8. Pergunta se quer salvar como perfil
+
+### Etapa 13 — Template Engine
+
+Gera arquivos base embutidos no código — sem dependência de rede ou arquivos externos:
+
+- `package.json` com scripts configurados
+- `tsconfig.json` com configurações corretas para a stack
+- `src/main.ts` com boilerplate do framework
+- Estrutura de pastas por arquitetura (modular, DDD...)
+- `prisma/schema.prisma` com provider correto
+- `.env.example`, `.gitignore` e `README.md`
+
+### Etapa 14 — Profile Memory
+
+Salva stacks favoritas em `~/.agent/profiles/` (global, não por projeto):
+
+```bash
+# Salva durante o agent new
+? Salvar essa stack como perfil para reusar depois? Yes
+? Nome do perfil: nestjs-prisma-ddd
+
+# Usa em projetos futuros
+agent new novo-projeto --profile nestjs-prisma-ddd
+```
+
+### Resultado dos testes
+
+```
+✅ stack-wizard.ts importado sem erros
+✅ template-engine.ts importado sem erros
+✅ profile-memory.ts importado sem erros
+✅ new.ts importado sem erros
+✅ Template Engine gerou arquivos para NestJS + Prisma sem I/O
+✅ Profile Memory: salvar, carregar, listar e deletar funcionando
+✅ Perfis persistidos em ~/.agent/profiles/
+✅ Comando "new" registrado no CLI
+```
+
+---
+
+_README atualizado após conclusão das Etapas 12, 13 e 14_
+
+-
