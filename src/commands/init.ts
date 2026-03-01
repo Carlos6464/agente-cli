@@ -59,8 +59,8 @@ export async function runInit(options: { reindex?: boolean; projectRoot?: string
     type: 'list', name: 'aiType',
     message: 'Como você deseja rodar a IA?',
     choices: [
-      { name: '☁️  Cloud (Recomendado - Mais rápido, requer API Key)', value: 'cloud' },
-      { name: '💻 Local (Ollama - Gratuito, usa seu hardware)', value: 'local' }
+      { name: '☁️  Cloud (Gemini, OpenAI) - Rápido, inteligente e perfeito para projetos grandes', value: 'cloud' },
+      { name: '💻 Local (Ollama) - 100% privado, mas requer PC forte (Pode ser lento em Monorepos)', value: 'local' }
     ]
   }])
 
