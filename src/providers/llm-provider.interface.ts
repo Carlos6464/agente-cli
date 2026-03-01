@@ -60,3 +60,13 @@ export interface ILLMProvider {
   // Lista os modelos disponíveis no provider
   listModels(): Promise<string[]>
 }
+
+export type AIProviderName = 'ollama' | 'openai' | 'gemini' | 'claude'
+
+export interface AIConfig {
+  provider:       AIProviderName
+  apiKey?:        string
+  baseUrl?:       string
+  defaultModel:   string
+  embeddingModel: string
+}

@@ -7,20 +7,6 @@ import { loadConfig, hasConfig }  from './init'
 import { runAgent, AgentStep }    from '../core/agent/agent-core'
 import { indexFile }              from '../rag/indexer'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AGENT GENERATE — zero conhecimento embutido
-//
-// Este arquivo não sabe nada sobre NestJS, Express, Prisma, TypeORM,
-// DDD, MVC ou qualquer outro framework/padrão.
-//
-// A instrução que o LLM recebe tem uma única regra:
-//   LEIA o projeto antes de escrever qualquer linha de código.
-//
-// O LLM descobre tudo sozinho: onde ficam os arquivos, como se chamam,
-// quais imports usam, qual versão da ferramenta está instalada,
-// qual padrão arquitetural está sendo seguido.
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function runGenerate(options: {
   tipo:         string
   nome:         string
@@ -43,70 +29,49 @@ export async function runGenerate(options: {
 
   const config = loadConfig(projectRoot)!
 
-  // A instrução não tem nenhum conhecimento sobre frameworks —
-  // apenas orienta o LLM a explorar e imitar o que encontrar
+  // Injeta os exemplos que a IA detectou no Init para ela não ficar cega testando list_dir atoa
+  const exemplosFound = config.profile.examplePaths 
+    ? Object.entries(config.profile.examplePaths).map(([k, v]) => `  - Exemplo de ${k}: ${v}`).join('\n') 
+    : '  (Nenhum exemplo base encontrado)'
+
   const instruction = `
-Preciso que você crie um(a) ${tipo} chamado(a) "${nome}"${app ? ` dentro do app "${app}"` : ''}.
+Objetivo: Criar um(a) ${tipo} chamado(a) "${nome}"${app ? ` no workspace/app "${app}"` : ''}.
 
-ETAPAS OBRIGATÓRIAS — execute nesta ordem antes de criar qualquer arquivo:
+Arquivos de exemplo reais detectados na arquitetura do usuário:
+${exemplosFound}
 
-1. LIST_DIR: Liste a raiz do projeto para entender a estrutura geral.
-
-2. ENCONTRE UM EXEMPLO REAL: Procure no projeto um arquivo do mesmo tipo "${tipo}" que já existe.
-   Use search_code ou list_dir para encontrá-lo.
-   Se não achar um "${tipo}", procure o tipo mais próximo (ex: se for "repository", procure "service").
-
-3. LEIA O EXEMPLO: Use read_file para ler esse arquivo existente completamente.
-   Observe e memorize:
-   - Exatamente onde o arquivo está no diretório
-   - Como se chama (padrão de nomenclatura)
-   - Quais imports usa e de onde vêm
-   - Quais decorators, anotações ou padrões aplica
-   - Como a classe/função/componente é estruturada internamente
-   - Qual versão das dependências está sendo usada (veja o package.json se precisar)
-
-4. SE NECESSÁRIO, leia mais 1 ou 2 arquivos relacionados para entender dependências
-   (ex: se for criar um module, leia um module existente E o arquivo principal do app).
-
-5. CRIE OS ARQUIVOS: Agora crie os novos arquivos imitando FIELMENTE o que você viu.
-   - Mesma localização de pasta (seguindo o padrão existente)
-   - Mesmo padrão de nomenclatura
-   - Mesmos imports e estrutura
-   - Não invente padrões novos
-   - Não use APIs ou sintaxes que não viu no projeto
-
-6. Use finish com um resumo do que foi criado.
-
-IMPORTANTE: Você não tem conhecimento sobre como este projeto específico funciona até ler os arquivos.
-Não assuma nada. Descubra tudo lendo o código real.
+REGRAS DE EXECUÇÃO:
+1. LER REFERÊNCIA: Se existir um arquivo de exemplo do mesmo tipo (ou parecido) na lista acima, USE A FERRAMENTA "read_file" nele primeiro para aprender os imports e o estilo de arquitetura exato (ex: injeção de dependência, decorators, types do DDD).
+2. DESCOBRIR LOCAL: Use "list_dir" se precisar saber onde salvar o arquivo novo.
+3. CRIAR O CÓDIGO: Use a ferramenta "write_file" para salvar o código gerado no disco.
+   🚨 REGRA DE OURO: NUNCA responda com blocos de código Markdown no chat! Sempre coloque o código final dentro do parâmetro "content" da ferramenta "write_file".
+4. FINALIZAR: Use a ferramenta "finish" informando o que foi feito.
 `.trim()
 
-  const spinner      = ora('Lendo o projeto...').start()
+  const spinner = ora('Iniciando o raciocínio da IA...').start()
   const filesCreated: string[] = []
 
   const result = await runAgent({
     instruction,
-    profile:  config.profile,
+    profile: config.profile,
     projectRoot,
-    baseUrl:  config.ollama.baseUrl,
-    mode:     'generate',
+    aiConfig: config.ai,
+    mode: 'generate',
     maxSteps: 25,
     onStep: (step: AgentStep) => {
-      const labels: Record<string, string> = {
-        list_dir:    'Explorando estrutura...',
-        read_file:   'Lendo referência...',
-        search_code: 'Procurando exemplos...',
-        write_file:  'Criando arquivo...',
-        finish:      'Finalizando...',
+      const labels: Record<string, string> = { 
+        list_dir: 'Explorando pastas...', 
+        read_file: 'Lendo código de referência do Aura...', 
+        search_code: 'Buscando padrões...', 
+        write_file: 'Escrevendo arquivo no disco...', 
+        finish: 'Finalizando...' 
       }
       if (step.type === 'tool_call') {
-        const tool = step.tool || ''
-        if (tool === 'write_file') {
-          const match = step.content.match(/"path"\s*:\s*"([^"]+)"/)
-          spinner.text = match ? `Criando ${path.basename(match[1])}...` : 'Criando arquivo...'
-        } else {
-          spinner.text = labels[tool] || `${tool}...`
-        }
+        spinner.text = step.tool === 'write_file' && step.content.match(/"path"\s*:\s*"([^"]+)"/) 
+          ? `Salvando ${path.basename(step.content.match(/"path"\s*:\s*"([^"]+)"/)![1])}...` 
+          : labels[step.tool!] || `${step.tool}...`
+      } else if (step.type === 'thinking') {
+         spinner.text = step.content
       }
       if (step.type === 'tool_result' && step.tool === 'write_file') {
         const match = step.content.match(/Arquivo criado: (.+)/)
@@ -118,57 +83,42 @@ Não assuma nada. Descubra tudo lendo o código real.
   spinner.stop()
 
   if (!result.success) {
-    console.log(chalk.red(`\n  ❌ Erro: ${result.error}\n`))
-    process.exit(1)
+    console.log(chalk.red(`\n  ❌ Erro: ${result.error}\n`)); process.exit(1)
   }
 
   const allFiles = result.files?.length ? result.files : filesCreated
 
   if (allFiles.length > 0) {
     console.log(chalk.bold.green('\n  ✅ Arquivos gerados:\n'))
-    allFiles.forEach(f => {
-      console.log(chalk.white(`    + ${f.replace(projectRoot + '/', '')}`))
-    })
+    allFiles.forEach(f => console.log(chalk.white(`    + ${f.replace(projectRoot + '/', '')}`)))
   } else {
-    console.log(chalk.yellow('\n  ⚠️  Nenhum arquivo foi criado.\n'))
-    process.exit(0)
+    console.log(chalk.yellow('\n  ⚠️  Nenhum arquivo foi criado.\n')); process.exit(0)
   }
 
-  if (result.response) {
-    console.log('\n' + chalk.gray('  ' + result.response.replace(/\n/g, '\n  ')) + '\n')
-  }
+  if (result.response) console.log('\n' + chalk.gray('  ' + result.response.replace(/\n/g, '\n  ')) + '\n')
 
-  // Reindexe
   let shouldReindex = yes
-  if (!yes) {
-    const { confirm } = await inquirer.prompt([{
-      type: 'confirm', name: 'confirm',
-      message: `Reindexar ${allFiles.length} arquivo(s) no RAG?`,
-      default: true
-    }])
+  if (!yes && allFiles.length > 0) {
+    const { confirm } = await inquirer.prompt([{ type: 'confirm', name: 'confirm', message: `Reindexar ${allFiles.length} arquivo(s) na IA?`, default: true }])
     shouldReindex = confirm
   }
 
-  if (shouldReindex) {
+  if (shouldReindex && allFiles.length > 0) {
     const s = ora('Reindexando...').start()
     for (const f of allFiles) {
-      await indexFile(f, projectRoot, config.ollama.baseUrl, config.ollama.embeddingModel)
+      await indexFile(f, projectRoot, config.ai.baseUrl || 'http://localhost:11434', config.ai.embeddingModel)
     }
     s.succeed(`${allFiles.length} arquivo(s) reindexado(s)`)
   }
-
-  console.log('')
 }
 
 export function generateCommand(): Command {
   const cmd = new Command('generate')
   cmd.description('Gera código lendo e imitando os padrões reais do projeto')
-     .argument('<tipo>', 'O que gerar (ex: module, service, component, page, hook, dto...)')
-     .argument('<nome>', 'Nome do que gerar (ex: payments, UserProfile)')
-     .option('--app <app>', 'App alvo no monorepo')
-     .option('-y, --yes',   'Pula confirmações')
-     .action(async (tipo: string, nome: string, options: { app?: string; yes?: boolean }) => {
-       await runGenerate({ tipo, nome, app: options.app, yes: options.yes })
-     })
+     .argument('<tipo>', 'Ex: module, service, use-case, dto, vo')
+     .argument('<nome>', 'Nome')
+     .option('--app <app>', 'App ou Lib alvo (ex: libs/domain)')
+     .option('-y, --yes', 'Pula confirmações')
+     .action(async (tipo: string, nome: string, options: any) => { await runGenerate({ tipo, nome, app: options.app, yes: options.yes }) })
   return cmd
 }

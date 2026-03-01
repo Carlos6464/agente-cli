@@ -1,263 +1,112 @@
-import { OllamaProvider, OLLAMA_MODELS } from '../../providers/ollama.provider'
-import { LLMMessage }                    from '../../providers/llm-provider.interface'
-import { buildContext }                  from '../context-builder/context-builder'
-import { StackProfile }                  from '../detector/stack-detector'
+import { ProviderFactory } from '../../providers/provider.factory'
+import { LLMMessage, AIConfig } from '../../providers/llm-provider.interface'
+import { buildContext } from '../context-builder/context-builder'
+import { StackProfile } from '../detector/stack-detector'
 import { formatToolsForPrompt, ToolCall, ToolResult, TOOL_DEFINITIONS } from './tool-definitions'
-import { executeTool }                   from './tool-executor'
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AGENT CORE
-//
-// O loop principal do agente.
-// Recebe uma instrução, monta o contexto e entra no loop:
-//   1. Envia mensagens para o LLM
-//   2. LLM responde com texto ou com uma tool call em JSON
-//   3. Se for tool call → executa a ferramenta → resultado volta pro LLM
-//   4. Se for texto → retorna ao usuário
-//   5. Repete até o LLM usar "finish" ou atingir o limite de iterações
-// ─────────────────────────────────────────────────────────────────────────────
+import { executeTool } from './tool-executor'
 
 export interface AgentOptions {
   instruction:  string
   profile:      StackProfile
   projectRoot?: string
-  baseUrl?:     string
+  aiConfig:     AIConfig
   mode?:        'generate' | 'chat' | 'run'
-  maxSteps?:    number             // proteção contra loops infinitos
-  onStep?:      (step: AgentStep) => void  // callback para mostrar progresso
+  maxSteps?:    number
+  onStep?:      (step: AgentStep) => void
 }
 
-export interface AgentStep {
-  type:    'thinking' | 'tool_call' | 'tool_result' | 'response'
-  content: string
-  tool?:   string
-}
-
-export interface AgentResult {
-  success:  boolean
-  response: string         // resposta final para o usuário
-  steps:    AgentStep[]    // histórico de todos os passos
-  files?:   string[]       // arquivos criados/modificados
-  error?:   string
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FUNÇÃO PRINCIPAL
-// ─────────────────────────────────────────────────────────────────────────────
+export interface AgentStep { type: 'thinking'|'tool_call'|'tool_result'|'response', content: string, tool?: string }
+export interface AgentResult { success: boolean, response: string, steps: AgentStep[], files?: string[], error?: string }
 
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
-  const {
-    instruction,
-    profile,
-    projectRoot = process.cwd(),
-    baseUrl     = 'http://localhost:11434',
-    mode        = 'generate',
-    maxSteps    = 15,
-    onStep
-  } = options
-
-  const steps:        AgentStep[] = []
-  const filesCreated: string[]    = []
-  const provider = new OllamaProvider(OLLAMA_MODELS.DEFAULT, baseUrl)
-
-  const log = (step: AgentStep) => {
-    steps.push(step)
-    onStep?.(step)
-  }
+  const { instruction, profile, projectRoot = process.cwd(), aiConfig, mode = 'generate', maxSteps = 15, onStep } = options
+  const steps: AgentStep[] = []; const filesCreated: string[] = []
+  const provider = ProviderFactory.create(aiConfig)
+  const log = (step: AgentStep) => { steps.push(step); onStep?.(step) }
 
   try {
-    // ── 1. Monta o contexto inicial ──────────────────────────────────────────
-    const contextResult = await buildContext({
-      instruction,
-      profile,
-      projectRoot,
-      baseUrl,
-      mode
-    })
+    const ctx = await buildContext({ instruction, profile, projectRoot, mode })
+    if (!ctx.success || !ctx.messages) return { success: false, response: '', steps, error: ctx.error }
+    const messages = ctx.messages.map(m => m.role === 'system' ? { ...m, content: m.content + '\n\n' + formatToolsForPrompt() } : m)
 
-    if (!contextResult.success || !contextResult.messages) {
-      return { success: false, response: '', steps, error: contextResult.error }
-    }
-
-    // Injeta as definições de ferramentas no system prompt
-    const messages: LLMMessage[] = injectToolsIntoMessages(contextResult.messages)
-
-    // ── 2. Loop principal ────────────────────────────────────────────────────
     let stepCount = 0
-
-    while (stepCount < maxSteps) {
-      stepCount++
-
-      log({ type: 'thinking', content: `Passo ${stepCount}/${maxSteps}` })
-
-      // Envia as mensagens para o LLM
+    while (stepCount++ < maxSteps) {
+      log({ type: 'thinking', content: `Processando (Passo ${stepCount}/${maxSteps})...` })
       const llmResult = await provider.complete(messages, { temperature: 0.1 })
+      if (!llmResult.success || !llmResult.content) return { success: false, response: '', steps, error: llmResult.error }
+      
+      const llmResponse = llmResult.content.trim()
+      
+      let toolCall: ToolCall | null = null
+      let jsonParseError: string | null = null
 
-      if (!llmResult.success || !llmResult.content) {
-        return {
-          success:  false,
-          response: '',
-          steps,
-          error: llmResult.error
+      // 1. Extração do JSON
+      const jsonBlockMatch = llmResponse.match(/```(?:json)?\s*(\{[\s\S]*?"tool"[\s\S]*?\})\s*```/i)
+      const rawJson = jsonBlockMatch ? jsonBlockMatch[1] : llmResponse.match(/\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"params"\s*:\s*\{[\s\S]*?\}\s*\}/)?.[0]
+
+      if (rawJson) {
+        try { 
+          const p = JSON.parse(rawJson)
+          if (p.tool && TOOL_DEFINITIONS.some(t => t.name === p.tool)) {
+            toolCall = { tool: p.tool, params: p.params || {} }
+          }
+        } catch (e) {
+          jsonParseError = (e as Error).message
         }
       }
 
-      const llmResponse = llmResult.content.trim()
-
-      // ── 3. Tenta interpretar como tool call ──────────────────────────────
-      const toolCall = parseToolCall(llmResponse)
-
-      if (toolCall) {
-        // LLM quer usar uma ferramenta
-        log({
-          type:    'tool_call',
-          content: `Chamando ${toolCall.tool}(${JSON.stringify(toolCall.params)})`,
-          tool:    toolCall.tool
-        })
-
-        // Verifica se é a ferramenta de finalização
-        if (toolCall.tool === 'finish') {
-          const summary = toolCall.params.summary || 'Tarefa concluída.'
-          log({ type: 'response', content: summary })
-          return {
-            success:  true,
-            response: summary,
-            steps,
-            files: filesCreated
+      // 2. MAGIA DE BYPASS DO JSON (Para o write_file)
+      // Se a ferramenta é write_file e o content veio vazio, pega o código do bloco Markdown!
+      if (toolCall && toolCall.tool === 'write_file') {
+        if (!toolCall.params.content || toolCall.params.content.trim() === '') {
+          const codeBlock = llmResponse.match(/```(?:typescript|ts|javascript|js)?\n([\s\S]+?)\n```/i)
+          if (codeBlock) {
+            toolCall.params.content = codeBlock[1].trim()
+            jsonParseError = null // Resolve qualquer erro falso
+          } else {
+             jsonParseError = "Faltou enviar o bloco de código Markdown logo abaixo do JSON."
+             toolCall = null
           }
         }
+      }
 
-        // Executa a ferramenta
-        const toolResult: ToolResult = await executeTool(toolCall, projectRoot)
-
-        // Registra arquivos criados
-        if (toolCall.tool === 'write_file' && toolResult.success) {
-          filesCreated.push(toolCall.params.path)
+      // 3. FALLBACK: A IA ignorou o JSON e mandou texto puro
+      if (!toolCall && llmResponse.includes('"write_file"')) {
+        const pathMatch = llmResponse.match(/"path"\s*:\s*"([^"]+)"/)
+        const codeMatch = llmResponse.match(/```(?:typescript|ts|javascript|js)?\n([\s\S]+?)\n```/i)
+        if (pathMatch && codeMatch) {
+          toolCall = { tool: 'write_file', params: { path: pathMatch[1], content: codeMatch[1].trim() } }
+          jsonParseError = null;
         }
+      }
 
-        log({
-          type:    'tool_result',
-          content: toolResult.success
-            ? toolResult.output.slice(0, 200) + (toolResult.output.length > 200 ? '...' : '')
-            : `Erro: ${toolResult.error}`,
-          tool: toolCall.tool
-        })
-
-        // Adiciona a resposta do LLM e o resultado da ferramenta no histórico
-        // para o próximo passo ter contexto do que aconteceu
-        messages.push({ role: 'assistant', content: llmResponse })
-        messages.push({
-          role:    'user',
-          content: formatToolResult(toolResult)
-        })
-
+      if (toolCall) {
+        log({ type: 'tool_call', content: `Executando ${toolCall.tool}...`, tool: toolCall.tool })
+        if (toolCall.tool === 'finish') return { success: true, response: toolCall.params.summary || 'Finalizado.', steps, files: filesCreated }
+        
+        const res = await executeTool(toolCall, projectRoot)
+        if (toolCall.tool === 'write_file' && res.success) filesCreated.push(toolCall.params.path)
+        
+        log({ type: 'tool_result', content: res.success ? res.output.slice(0, 150) : res.error!, tool: toolCall.tool })
+        messages.push({ role: 'assistant', content: llmResponse }, { role: 'user', content: res.success ? `Tool executada com sucesso. Output:\n${res.output}\nSiga para o próximo passo ou chame finish.` : `Erro na tool: ${res.error}` })
+      
+      } else if (jsonParseError) {
+         log({ type: 'thinking', content: `Erro de formato. Acordando a IA...` })
+         messages.push({ role: 'assistant', content: llmResponse })
+         messages.push({ role: 'user', content: `ERRO DE SINTAXE: O formato falhou (${jsonParseError}). Lembre-se: mande o JSON com content vazio, e o código logo abaixo em Markdown.` })
       } else {
-        // LLM respondeu com texto puro — é a resposta final
-        log({ type: 'response', content: llmResponse })
-
-        return {
-          success:  true,
-          response: llmResponse,
-          steps,
-          files: filesCreated
+        const isLeakingCode = llmResponse.includes('```typescript') || llmResponse.includes('```ts')
+        if (mode === 'generate' && isLeakingCode && filesCreated.length === 0) {
+           log({ type: 'thinking', content: `A IA vazou código texto. Forçando correção...` })
+           messages.push({ role: 'assistant', content: llmResponse })
+           messages.push({ role: 'user', content: `ERRO: Você me enviou o código como texto puro em vez de usar a ferramenta! OBRIGATÓRIO: Use a sintaxe correta do write_file para SALVAR o código que você acabou de gerar.` })
+           continue
         }
+
+        log({ type: 'response', content: llmResponse })
+        return { success: true, response: llmResponse, steps, files: filesCreated }
       }
     }
-
-    // Atingiu o limite de passos sem concluir
-    return {
-      success:  false,
-      response: '',
-      steps,
-      error: `Limite de ${maxSteps} passos atingido sem conclusão`
-    }
-
-  } catch (err) {
-    return {
-      success:  false,
-      response: '',
-      steps,
-      error: `Erro no agente: ${(err as Error).message}`
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PARSE DE TOOL CALL
-//
-// O LLM responde com JSON quando quer usar uma ferramenta:
-// {"tool": "read_file", "params": {"path": "src/index.ts"}}
-//
-// Precisamos extrair esse JSON da resposta, que pode conter:
-// - JSON puro
-// - JSON dentro de bloco ```json ... ```
-// - Texto antes ou depois do JSON
-// ─────────────────────────────────────────────────────────────────────────────
-
-function parseToolCall(response: string): ToolCall | null {
-  // Tenta extrair JSON de dentro de bloco de código
-  const codeBlockMatch = response.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
-  if (codeBlockMatch) {
-    return tryParseJson(codeBlockMatch[1])
-  }
-
-  // Tenta extrair JSON diretamente
-  const jsonMatch = response.match(/\{[\s\S]*\}/)
-  if (jsonMatch) {
-    return tryParseJson(jsonMatch[0])
-  }
-
-  return null
-}
-
-function tryParseJson(str: string): ToolCall | null {
-  try {
-    const parsed = JSON.parse(str)
-
-    // Valida que tem os campos necessários
-    if (
-      typeof parsed.tool === 'string' &&
-      parsed.tool.length > 0 &&
-      TOOL_DEFINITIONS.some(t => t.name === parsed.tool)
-    ) {
-      return {
-        tool:   parsed.tool,
-        params: parsed.params || {}
-      }
-    }
-
-    return null
-  } catch {
-    return null
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FORMATA O RESULTADO DE UMA FERRAMENTA PARA O LLM
-// ─────────────────────────────────────────────────────────────────────────────
-
-function formatToolResult(result: ToolResult): string {
-  if (result.success) {
-    return `Resultado de "${result.tool}":\n${result.output}`
-  } else {
-    return `Erro em "${result.tool}": ${result.error}\n\nTente uma abordagem diferente.`
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// INJETA AS FERRAMENTAS NO SYSTEM PROMPT
-// ─────────────────────────────────────────────────────────────────────────────
-
-function injectToolsIntoMessages(messages: LLMMessage[]): LLMMessage[] {
-  const toolsSection = formatToolsForPrompt()
-
-  return messages.map(msg => {
-    if (msg.role === 'system') {
-      return {
-        ...msg,
-        content: msg.content + '\n\n' + toolsSection
-      }
-    }
-    return msg
-  })
+    return { success: false, response: '', steps, error: `Limite de ${maxSteps} passos atingido.` }
+  } catch (err) { return { success: false, response: '', steps, error: (err as Error).message } }
 }

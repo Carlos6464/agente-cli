@@ -22,7 +22,7 @@
     "dev:test-run": "node -r ts-node/register src/test-run.ts",
     "dev:test-chat": "node -r ts-node/register src/test-chat.ts",
     "dev:test-new": "node -r ts-node/register src/test-new.ts",
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/index.js",
     "start": "node dist/index.js"
   },
   "dependencies": {
