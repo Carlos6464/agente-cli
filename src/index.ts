@@ -7,6 +7,8 @@ import { initCommand } from './commands/init'
 import { generateCommand } from './commands/generate'
 import { runCommand } from './commands/run'
 import { chatCommand } from './commands/chat'
+import { indexCommand } from './commands/index-cmd'
+
 
 const program = new Command()
 
@@ -17,6 +19,7 @@ program
 
 // program.addCommand(newCommand())
 program.addCommand(initCommand())
+program.addCommand(indexCommand())
 program.addCommand(generateCommand())
 program.addCommand(runCommand())
 program.addCommand(chatCommand())
