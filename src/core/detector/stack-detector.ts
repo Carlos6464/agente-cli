@@ -21,6 +21,7 @@ export interface StackProfile {
   database: 'postgresql' | 'mysql' | 'mongodb' | 'sqlite' | 'none' | 'unknown'
   architecture: Architecture
   testing: 'jest' | 'mocha' | 'pytest' | 'vitest' | 'cypress' | 'playwright' | 'none'
+  docker: 'dockerfile' | 'compose' | 'both' | 'none'
   apps: string[]
   ambiguities: string[]
   examplePaths: {
@@ -63,6 +64,7 @@ export function detectStack(projectRoot: string): DetectionResult {
       database: detectDatabase(names, projectRoot, allDeps),
       architecture: detectArchitecture(projectRoot, names, workspaces),
       testing: detectTesting(names, projectRoot, allDeps),
+      docker: detectDocker(names),
       apps: workspaces,
       ambiguities: [],
       examplePaths: findExamplePaths(projectRoot, workspaces)
@@ -246,6 +248,16 @@ function detectTesting(names: string[], projectRoot: string, allDeps: string[]):
   return 'none'
 }
 
+function detectDocker(names: string[]): StackProfile['docker'] {
+  const hasDockerfile = names.some(n => n.toLowerCase() === 'dockerfile')
+  const hasCompose = names.some(n => n.toLowerCase().includes('docker-compose.'))
+
+  if (hasDockerfile && hasCompose) return 'both'
+  if (hasDockerfile) return 'dockerfile'
+  if (hasCompose) return 'compose'
+  return 'none'
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DETECÇÃO DE ARQUITETURA INTELIGENTE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,7 +277,6 @@ function detectArchitecture(projectRoot: string, rootNames: string[], workspaces
 
   foldersToAnalyze.push(...workspaces.map(ws => path.basename(ws).toLowerCase()))
 
-  // Removido o 'core' propositalmente para não causar falsos positivos de DDD no FastAPI
   if (foldersToAnalyze.some(f => ['domain', 'application', 'infrastructure', 'use-cases'].includes(f))) return 'ddd'
   if (foldersToAnalyze.some(f => ['modules', 'features'].includes(f))) return 'modular'
   if (foldersToAnalyze.some(f => ['controllers', 'routes', 'api', 'routers', 'repositories'].includes(f))) return 'mvc'
@@ -288,6 +299,9 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
       })
     : [path.join(projectRoot, 'src'), path.join(projectRoot, 'app'), path.join(projectRoot, 'lib'), projectRoot]
 
+  // Para o Dockerfile, incluímos a raiz (projectRoot) explicitamente, já que eles costumam estar lá
+  searchDirs.push(projectRoot)
+
   const patterns = [
     // Backend
     { key: 'controller', file: /(controller|router)\.(ts|js|py|php)$/i,           path: /\/(controllers?|routers?)\/.*\.(ts|js|py|php)$/i },
@@ -295,8 +309,6 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
     { key: 'use-case',   file: /use-?case\.(ts|js|py|php)$/i,                     path: /\/(use-?cases?)\/.*\.(ts|js|py|php)$/i },
     { key: 'port',       file: /ports?\.(ts|js|py|php)$/i,                        path: /\/(ports?)\/.*\.(ts|js|py|php)$/i },
     { key: 'model',      file: /model\.(ts|js|py|php)$/i,                         path: /\/(models?)\/.*\.(ts|js|py|php)$/i },
-    { key: 'errors',     file: /errors?\.(ts|js|py|php)$/i,                        path: /\/(errors?)\/.*\.(ts|js|py|php)$/i },
-    { key: 'strategies', file: /strategies?\.(ts|js|py|php)$/i,                    path: /\/(strategies?)\/.*\.(ts|js|py|php)$/i },
     { key: 'entity',     file: /(entity|usuario|postagem|papel)\.(ts|js|py|php)$/i,path: /\/(entities)\/.*\.(ts|js|py|php)$/i },
     { key: 'repository', file: /repository\.(ts|js|py|php)$/i,                    path: /\/(repositories)\/.*\.(ts|js|py|php)$/i },
     { key: 'schema',     file: /schema\.(ts|js|py|php)$/i,                        path: /\/(schemas?)\/.*\.(ts|js|py|php)$/i },
@@ -311,7 +323,11 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
     { key: 'layout',     file: /layout\.(ts|tsx|js|jsx|vue|dart)$/i,              path: /\/(layouts?)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
     { key: 'hook',       file: /^use[A-Z].*\.(ts|tsx|js|jsx)$/,                   path: /\/(hooks?)\/.*\.(ts|tsx|js|jsx)$/i },
     { key: 'store',      file: /(store|slice|context|state)\.(ts|tsx|js|jsx)$/i,  path: /\/(stores?|slices?|contexts?|states?)\/.*\.(ts|tsx|js|jsx)$/i },
-    { key: 'template',   file: /\.html$/i,                                        path: null }
+    { key: 'template',   file: /\.html$/i,                                        path: null },
+
+    // DOCKER INFRASTRUCTURE
+    { key: 'dockerfile', file: /^dockerfile$/i,                                   path: null },
+    { key: 'compose',    file: /^docker-compose.*\.(yml|yaml)$/i,                 path: null }
   ]
 
   for (const dir of searchDirs) {
@@ -325,14 +341,11 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
       
       const fileName = item.name
       
-      // Ignora arquivos de teste
       if (fileName.includes('.test.') || fileName.includes('.spec.') || fileName.startsWith('test_')) continue
       
-      // Filtra estritamente por extensões de código aceitas
-      if (!/\.(ts|tsx|js|jsx|py|go|php|vue|dart|html)$/.test(fileName)) continue
+      // Expandimos para ler os ficheiros do Docker
+      if (!/\.(ts|tsx|js|jsx|py|go|php|vue|dart|html|yml|yaml)$/i.test(fileName) && fileName.toLowerCase() !== 'dockerfile') continue
       
-      // TRAVA DE SEGURANÇA: Ignora explicitamente os arquivos de "barril" (exportação) e de inicialização vazios
-      // Permite index.tsx/jsx porque no React/Next/Expo eles são frequentemente componentes de tela reais
       if (/^(__init__\.py|index\.(ts|js))$/.test(fileName)) continue
 
       const unixPath = item.path.replace(/\\/g, '/')

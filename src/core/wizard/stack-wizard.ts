@@ -203,6 +203,22 @@ export async function runWizard(projectName: string): Promise<WizardResult> {
     testing = testChoice
   }
 
+  // ── 10.5 Docker ───────────────────────────────────────────────────────────
+  let docker = 'none'
+
+  if (['backend', 'fullstack', 'monorepo', 'frontend'].includes(projectType)) {
+    const { dockerChoice } = await inquirer.prompt([{
+      type: 'list', name: 'dockerChoice', message: 'Configuração de Docker inicial?',
+      choices: [
+        { name: 'Ambos (Dockerfile + Compose)', value: 'both' },
+        { name: 'Apenas Dockerfile', value: 'dockerfile' },
+        { name: 'Apenas Docker Compose', value: 'compose' },
+        { name: 'Nenhuma', value: 'none' },
+      ]
+    }])
+    docker = dockerChoice
+  }
+
   // ── 11. Salvar como perfil ────────────────────────────────────────────────
 
   const { saveProfile } = await inquirer.prompt([{
@@ -238,6 +254,7 @@ export async function runWizard(projectName: string): Promise<WizardResult> {
     database:       database       as any,
     architecture:   architecture   as any,
     testing:        testing        as any,
+    docker:         docker         as any, // Propriedade adicionada!
     apps:           [],
     ambiguities:    [],
     examplePaths:   {}
