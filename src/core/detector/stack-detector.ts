@@ -1,49 +1,32 @@
-const path = require('path')
-import { readFile, listDir } from '../../tools/filesystem.tools'
+import path from 'path'
+import fs from 'fs'
+import { listDir, readFile } from '../../tools/filesystem.tools'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TIPOS
+// TIPOS E INTERFACES
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type PackageManager = 'npm' | 'yarn' | 'pnpm' | 'bun' | 'unknown'
-export type MonorepoTool   = 'turborepo' | 'nx' | 'lerna' | 'none'
-export type Language       = 'typescript' | 'javascript' | 'python' | 'php' | 'ruby' | 'go' | 'unknown'
-export type Backend        = 'nestjs' | 'express' | 'fastify' | 'laravel' | 'django' | 'fastapi' | 'rails' | 'none'
-export type Frontend       = 'nextjs' | 'react' | 'nuxt' | 'angular' | 'vue' | 'vite' | 'none'
-export type Mobile         = 'expo' | 'react-native-cli' | 'flutter' | 'none'
-export type ORM            = 'prisma' | 'typeorm' | 'drizzle' | 'mongoose' | 'sequelize' | 'eloquent' | 'activerecord' | 'none'
-export type Database       = 'postgresql' | 'mysql' | 'sqlite' | 'mongodb' | 'redis' | 'unknown' | 'none'
-export type Architecture   = 'ddd' | 'mvc' | 'modular' | 'simple' | 'unknown'
-export type TestFramework  = 'jest' | 'vitest' | 'phpunit' | 'pytest' | 'rspec' | 'none'
+export type Architecture = 'mvc' | 'modular' | 'ddd' | 'clean' | 'simple' | 'component-based' | 'none' | 'unknown'
 
 export interface StackProfile {
   projectName: string
   rootDir: string
-  language: Language
-  packageManager: PackageManager
-  monorepo: MonorepoTool
-  backend: Backend
-  frontend: Frontend
-  mobile: Mobile
-  orm: ORM
-  database: Database
+  language: 'typescript' | 'javascript' | 'python' | 'go' | 'php' | 'dart' | 'unknown'
+  packageManager: 'npm' | 'yarn' | 'pnpm' | 'pip' | 'composer' | 'none'
+  monorepo: 'turborepo' | 'nx' | 'none'
+  backend: 'express' | 'nestjs' | 'fastapi' | 'laravel' | 'fastify' | 'none'
+  frontend: 'angular' | 'react' | 'nextjs' | 'vue' | 'nuxtjs' | 'none'
+  mobile: 'react-native' | 'expo' | 'ionic' | 'flutter' | 'none'
+  orm: 'prisma' | 'typeorm' | 'sequelize' | 'eloquent' | 'drizzle' | 'sqlalchemy' | 'none'
+  database: 'postgresql' | 'mysql' | 'mongodb' | 'sqlite' | 'none' | 'unknown'
   architecture: Architecture
-  testing: TestFramework
-  apps: string[] // Contém a lista de todas as apps/* e libs/*
+  testing: 'jest' | 'mocha' | 'pytest' | 'vitest' | 'cypress' | 'playwright' | 'none'
+  apps: string[]
   ambiguities: string[]
   examplePaths: {
-    module?: string
-    service?: string
-    controller?: string
-    entity?: string
-    repository?: string
-    'use-case'?: string
-    schema?: string
-    vo?: string
-    strategy?: string
-    dto?: string
-    [key: string]: string | undefined
+    [key: string]: string
   }
+  architecturalSummary?: string
 }
 
 export interface DetectionResult {
@@ -53,284 +36,316 @@ export interface DetectionResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DETECTOR PRINCIPAL
+// FUNÇÃO PRINCIPAL
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function detectStack(projectRoot: string = process.cwd()): DetectionResult {
+export function detectStack(projectRoot: string): DetectionResult {
   try {
-    const ambiguities: string[] = []
-    
-    const rootItems = listDir(projectRoot)
-    const rootNames = rootItems.success ? rootItems.items!.map(i => i.name) : []
-
-    // ── 1. Detectar Workspaces Reais (apps, libs, packages) ────────────────
-    const workspaces = detectWorkspaces(projectRoot, rootNames)
-
-    // ── 2. Agregar TODAS as dependências do Monorepo ───────────────────────
-    let allDeps: string[] = []
-    let packageJson: any = null
-
-    // Lendo o package.json da raiz
-    const rootPkgResult = readFile(path.join(projectRoot, 'package.json'))
-    if (rootPkgResult.success && rootPkgResult.content) {
-      try {
-        packageJson = JSON.parse(rootPkgResult.content)
-        allDeps.push(...Object.keys(packageJson.dependencies || {}))
-        allDeps.push(...Object.keys(packageJson.devDependencies || {}))
-      } catch {}
+    const rootDir = listDir(projectRoot)
+    if (!rootDir.success || !rootDir.items) {
+      return { success: false, error: 'Não foi possível ler o diretório raiz.' }
     }
 
-    // Lendo os package.json dos workspaces (libs, apps, etc)
-    for (const ws of workspaces) {
-      const wsPkgResult = readFile(path.join(projectRoot, ws, 'package.json'))
-      if (wsPkgResult.success && wsPkgResult.content) {
-        try {
-          const wsPkg = JSON.parse(wsPkgResult.content)
-          allDeps.push(...Object.keys(wsPkg.dependencies || {}))
-          allDeps.push(...Object.keys(wsPkg.devDependencies || {}))
-        } catch {}
-      }
-    }
-
-    allDeps = [...new Set(allDeps)] // Remove dependências duplicadas
-
-    // ── 3. Detecta cada parte da stack baseada na visão global ─────────────
-    const language       = detectLanguage(projectRoot, rootNames, allDeps)
-    const packageManager = detectPackageManager(rootNames, packageJson)
-    const monorepo       = detectMonorepo(rootNames, packageJson, allDeps)
-    const backend        = detectBackend(allDeps, projectRoot, language)
-    const frontend       = detectFrontend(allDeps)
-    const mobile         = detectMobile(allDeps)
-    const orm            = detectORM(allDeps, language)
-    const database       = detectDatabase(allDeps, projectRoot, workspaces)
-    const testing        = detectTesting(allDeps, language)
-    const architecture   = detectArchitecture(projectRoot, rootNames, workspaces)
-    const examplePaths   = findExamplePaths(projectRoot, workspaces)
-
-    // ── 4. Registra ambiguidades ────────────────────────────────────────────
-    if (architecture === 'unknown') ambiguities.push('architecture')
-    if (database === 'unknown') ambiguities.push('database')
-    if (language === 'unknown') ambiguities.push('language')
+    const names = rootDir.items.map(i => i.name)
+    const workspaces = detectWorkspaces(projectRoot, names)
+    const allDeps = aggregateAllDependencies(projectRoot, workspaces)
 
     const profile: StackProfile = {
-      projectName: packageJson?.name || path.basename(projectRoot),
+      projectName: path.basename(projectRoot),
       rootDir: projectRoot,
-      language,
-      packageManager,
-      monorepo,
-      backend,
-      frontend,
-      mobile,
-      orm,
-      database,
-      architecture,
-      testing,
-      apps: workspaces, // Repassa todos os pacotes encontrados para a IA ver
-      ambiguities,
-      examplePaths
+      language: detectLanguage(names, allDeps),
+      packageManager: detectPackageManager(names),
+      monorepo: detectMonorepo(names),
+      backend: detectBackend(names, projectRoot, allDeps, workspaces),
+      frontend: detectFrontend(names, allDeps),
+      mobile: detectMobile(allDeps),
+      orm: detectORM(names, projectRoot, allDeps),
+      database: detectDatabase(names, projectRoot, allDeps),
+      architecture: detectArchitecture(projectRoot, names, workspaces),
+      testing: detectTesting(names, projectRoot, allDeps),
+      apps: workspaces,
+      ambiguities: [],
+      examplePaths: findExamplePaths(projectRoot, workspaces)
     }
 
     return { success: true, profile }
-
-  } catch (err) {
-    return { success: false, error: `Erro ao detectar stack: ${(err as Error).message}` }
+  } catch (e: any) {
+    return { success: false, error: e.message }
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FUNÇÕES DE DETECÇÃO AUXILIARES
+// FUNÇÕES AUXILIARES DE DETECÇÃO BÁSICA
 // ─────────────────────────────────────────────────────────────────────────────
 
-function detectWorkspaces(projectRoot: string, rootNames: string[]): string[] {
+function detectWorkspaces(projectRoot: string, names: string[]): string[] {
   const workspaces: string[] = []
-  const searchDirs = ['apps', 'libs', 'packages', 'services']
-
-  for (const dir of searchDirs) {
-    if (rootNames.includes(dir)) {
-      const items = listDir(path.join(projectRoot, dir))
-      if (items.success && items.items) {
-        for (const item of items.items) {
-          if (item.type === 'directory') workspaces.push(`${dir}/${item.name}`)
-        }
+  const dirsToScan = ['apps', 'packages', 'libs']
+  
+  for (const dir of dirsToScan) {
+    if (names.includes(dir)) {
+      const scan = listDir(path.join(projectRoot, dir))
+      if (scan.success && scan.items) {
+        workspaces.push(...scan.items.filter(i => i.type === 'directory').map(i => path.join(dir, i.name)))
       }
     }
   }
   return workspaces
 }
 
-function detectLanguage(projectRoot: string, rootNames: string[], allDeps: string[]): Language {
-  if (rootNames.includes('tsconfig.json') || allDeps.includes('typescript')) return 'typescript'
-  if (rootNames.includes('requirements.txt') || rootNames.includes('pyproject.toml')) return 'python'
-  if (rootNames.includes('composer.json')) return 'php'
-  if (rootNames.includes('Gemfile')) return 'ruby'
-  if (rootNames.includes('go.mod')) return 'go'
-  if (rootNames.includes('package.json')) return 'javascript'
-  return 'unknown'
-}
-
-function detectPackageManager(rootNames: string[], packageJson: any): PackageManager {
-  if (rootNames.includes('pnpm-lock.yaml') || rootNames.includes('pnpm-workspace.yaml')) return 'pnpm'
-  if (rootNames.includes('yarn.lock')) return 'yarn'
-  if (rootNames.includes('bun.lockb')) return 'bun'
-  if (rootNames.includes('package-lock.json')) return 'npm'
-  if (packageJson?.packageManager) {
-    if (packageJson.packageManager.startsWith('pnpm')) return 'pnpm'
-    if (packageJson.packageManager.startsWith('yarn')) return 'yarn'
-    if (packageJson.packageManager.startsWith('npm')) return 'npm'
+function aggregateAllDependencies(projectRoot: string, workspaces: string[]): string[] {
+  const deps = new Set<string>()
+  
+  const tryReadPkg = (dir: string) => {
+    const pkgPath = path.join(dir, 'package.json')
+    if (fs.existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+        if (pkg.dependencies) Object.keys(pkg.dependencies).forEach(d => deps.add(d))
+        if (pkg.devDependencies) Object.keys(pkg.devDependencies).forEach(d => deps.add(d))
+      } catch (e) {}
+    }
   }
-  if (rootNames.includes('package.json')) return 'npm'
+
+  tryReadPkg(projectRoot)
+  for (const ws of workspaces) {
+    tryReadPkg(path.join(projectRoot, ws))
+  }
+
+  return Array.from(deps)
+}
+
+function detectLanguage(names: string[], allDeps: string[]): StackProfile['language'] {
+  if (names.includes('tsconfig.json') || names.includes('tsconfig.base.json') || allDeps.includes('typescript')) return 'typescript'
+  if (names.includes('pubspec.yaml')) return 'dart'
+  if (names.includes('package.json')) return 'javascript'
+  if (names.includes('requirements.txt') || names.includes('pyproject.toml') || names.includes('main.py')) return 'python'
+  if (names.includes('composer.json')) return 'php'
+  if (names.includes('go.mod')) return 'go'
   return 'unknown'
 }
 
-function detectMonorepo(rootNames: string[], packageJson: any, allDeps: string[]): MonorepoTool {
-  if (rootNames.includes('turbo.json') || allDeps.includes('turbo')) return 'turborepo'
-  if (rootNames.includes('nx.json') || allDeps.includes('nx') || allDeps.includes('@nrwl/workspace')) return 'nx'
-  if (rootNames.includes('lerna.json')) return 'lerna'
+function detectPackageManager(names: string[]): StackProfile['packageManager'] {
+  if (names.includes('pnpm-lock.yaml') || names.includes('pnpm-workspace.yaml')) return 'pnpm'
+  if (names.includes('yarn.lock')) return 'yarn'
+  if (names.includes('package-lock.json')) return 'npm'
+  if (names.includes('composer.lock')) return 'composer'
+  if (names.includes('requirements.txt')) return 'pip'
   return 'none'
 }
 
-function detectBackend(allDeps: string[], projectRoot: string, language: Language): Backend {
-  if (allDeps.includes('@nestjs/core')) return 'nestjs'
+function detectMonorepo(names: string[]): StackProfile['monorepo'] {
+  if (names.includes('turbo.json')) return 'turborepo'
+  if (names.includes('nx.json')) return 'nx'
+  return 'none'
+}
+
+function detectBackend(names: string[], projectRoot: string, allDeps: string[], workspaces: string[]): StackProfile['backend'] {
+  if (allDeps.includes('@nestjs/core') || names.includes('nest-cli.json')) return 'nestjs'
+  if (names.includes('artisan')) return 'laravel'
+
+  if (names.includes('requirements.txt')) {
+    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+    if (req.success && req.content && req.content.toLowerCase().includes('fastapi')) return 'fastapi'
+    return 'none'
+  }
+
   if (allDeps.includes('fastify')) return 'fastify'
   if (allDeps.includes('express')) return 'express'
-  if (language === 'php') {
-    const composerResult = readFile(path.join(projectRoot, 'composer.json'))
-    if (composerResult.success && composerResult.content?.includes('laravel/framework')) return 'laravel'
+  
+  for (const ws of workspaces) {
+    if (fs.existsSync(path.join(projectRoot, ws, 'nest-cli.json'))) return 'nestjs'
   }
-  if (language === 'python') {
-    const reqResult = readFile(path.join(projectRoot, 'requirements.txt'))
-    if (reqResult.success && reqResult.content) {
-      if (reqResult.content.toLowerCase().includes('django')) return 'django'
-      if (reqResult.content.toLowerCase().includes('fastapi')) return 'fastapi'
-    }
-  }
+
   return 'none'
 }
 
-function detectFrontend(allDeps: string[]): Frontend {
-  if (allDeps.includes('next')) return 'nextjs'
-  if (allDeps.includes('nuxt')) return 'nuxt'
-  if (allDeps.includes('@angular/core')) return 'angular'
+function detectFrontend(names: string[], allDeps: string[]): StackProfile['frontend'] {
+  if (allDeps.includes('next') || names.includes('next.config.js') || names.includes('next.config.mjs') || names.includes('next.config.ts')) return 'nextjs'
+  if (allDeps.includes('nuxt') || names.includes('nuxt.config.js') || names.includes('nuxt.config.ts')) return 'nuxtjs'
+  if (allDeps.includes('@angular/core') || names.includes('angular.json')) return 'angular'
   if (allDeps.includes('vue')) return 'vue'
-  if (allDeps.includes('vite') && allDeps.includes('react')) return 'vite'
-  if (allDeps.includes('react')) return 'react'
+  if (allDeps.includes('react') || allDeps.includes('react-dom')) return 'react'
   return 'none'
 }
 
-function detectMobile(allDeps: string[]): Mobile {
+function detectMobile(allDeps: string[]): StackProfile['mobile'] {
   if (allDeps.includes('expo')) return 'expo'
-  if (allDeps.includes('react-native')) return 'react-native-cli'
+  if (allDeps.includes('react-native')) return 'react-native'
+  if (allDeps.includes('@ionic/react') || allDeps.includes('@ionic/angular') || allDeps.includes('@ionic/vue')) return 'ionic'
   return 'none'
 }
 
-function detectORM(allDeps: string[], language: Language): ORM {
-  if (allDeps.includes('@prisma/client') || allDeps.includes('prisma')) return 'prisma'
+function detectORM(names: string[], projectRoot: string, allDeps: string[]): StackProfile['orm'] {
+  if (allDeps.includes('drizzle-orm') || names.includes('drizzle.config.ts')) return 'drizzle'
+  if (allDeps.includes('@prisma/client') || names.includes('prisma')) return 'prisma'
   if (allDeps.includes('typeorm')) return 'typeorm'
-  if (allDeps.includes('drizzle-orm')) return 'drizzle'
-  if (allDeps.includes('mongoose')) return 'mongoose'
-  if (allDeps.includes('sequelize')) return 'sequelize'
-  if (language === 'php') return 'eloquent'
-  if (language === 'ruby') return 'activerecord'
+  
+  if (names.includes('requirements.txt')) {
+    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+    if (req.success && req.content && req.content.toLowerCase().includes('sqlalchemy')) return 'sqlalchemy'
+  }
+
   return 'none'
 }
 
-function detectDatabase(allDeps: string[], projectRoot: string, workspaces: string[]): Database {
-  if (allDeps.includes('pg') || allDeps.includes('@types/pg') || allDeps.includes('postgres')) return 'postgresql'
-  if (allDeps.includes('mysql2') || allDeps.includes('mysql')) return 'mysql'
-  if (allDeps.includes('better-sqlite3') || allDeps.includes('sqlite3')) return 'sqlite'
-  if (allDeps.includes('mongodb') || allDeps.includes('mongoose')) return 'mongodb'
-  if (allDeps.includes('ioredis') || allDeps.includes('redis')) return 'redis'
+function detectDatabase(names: string[], projectRoot: string, allDeps: string[]): StackProfile['database'] {
+  if (allDeps.includes('pg') || allDeps.includes('postgres') || allDeps.includes('@types/pg')) return 'postgresql'
+  if (allDeps.includes('mysql') || allDeps.includes('mysql2')) return 'mysql'
+  if (allDeps.includes('mongoose') || allDeps.includes('mongodb')) return 'mongodb'
+  if (allDeps.includes('sqlite3') || allDeps.includes('better-sqlite3')) return 'sqlite'
 
-  // Busca esquemas de banco (Prisma/Drizzle) em toda a arvore do monorepo
-  const searchDirs = [projectRoot, ...workspaces.map(ws => path.join(projectRoot, ws))]
-  for (const dir of searchDirs) {
-    const prisma = readFile(path.join(dir, 'prisma', 'schema.prisma'))
-    if (prisma.success && prisma.content) {
-      const content = prisma.content.toLowerCase()
-      if (content.includes('provider = "postgresql"')) return 'postgresql'
-      if (content.includes('provider = "mysql"')) return 'mysql'
-      if (content.includes('provider = "sqlite"')) return 'sqlite'
-      if (content.includes('provider = "mongodb"')) return 'mongodb'
+  if (names.includes('prisma')) {
+    const schemaPath = path.join(projectRoot, 'prisma', 'schema.prisma')
+    const schema = readFile(schemaPath)
+    if (schema.success && schema.content) {
+      if (schema.content.includes('provider = "postgresql"')) return 'postgresql'
+      if (schema.content.includes('provider = "mysql"')) return 'mysql'
+      if (schema.content.includes('provider = "mongodb"')) return 'mongodb'
+      if (schema.content.includes('provider = "sqlite"')) return 'sqlite'
     }
   }
-  return 'unknown'
+
+  if (names.includes('requirements.txt')) {
+    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+    if (req.success && req.content) {
+      const content = req.content.toLowerCase()
+      if (content.includes('psycopg2') || content.includes('asyncpg')) return 'postgresql'
+      if (content.includes('pymysql')) return 'mysql'
+      if (content.includes('motor') || content.includes('pymongo')) return 'mongodb'
+    }
+  }
+
+  const composeFile = names.includes('docker-compose.yml') ? 'docker-compose.yml' : 
+                      names.includes('docker-compose.yaml') ? 'docker-compose.yaml' : null;
+  if (composeFile) {
+    const compose = readFile(path.join(projectRoot, composeFile))
+    if (compose.success && compose.content) {
+      const content = compose.content.toLowerCase()
+      if (content.includes('image: postgres') || content.includes('postgres:')) return 'postgresql'
+      if (content.includes('image: mysql') || content.includes('mysql:')) return 'mysql'
+      if (content.includes('image: mongo') || content.includes('mongo:')) return 'mongodb'
+    }
+  }
+
+  return 'unknown' 
 }
 
-function detectTesting(allDeps: string[], language: Language): TestFramework {
-  if (allDeps.includes('vitest')) return 'vitest'
-  if (allDeps.includes('jest') || allDeps.includes('@types/jest')) return 'jest'
-  if (language === 'php') return 'phpunit'
-  if (language === 'python') return 'pytest'
-  if (language === 'ruby') return 'rspec'
+function detectTesting(names: string[], projectRoot: string, allDeps: string[]): StackProfile['testing'] {
+  if (allDeps.includes('cypress')) return 'cypress'
+  if (allDeps.includes('@playwright/test')) return 'playwright'
+  if (allDeps.includes('jest') || names.includes('jest.config.ts') || names.includes('jest.config.js')) return 'jest'
+  if (allDeps.includes('vitest') || names.includes('vitest.config.ts')) return 'vitest'
+  if (names.includes('pytest.ini') || names.includes('conftest.py')) return 'pytest'
+  
+  if (names.includes('requirements.txt')) {
+    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+    if (req.success && req.content && req.content.toLowerCase().includes('pytest')) return 'pytest'
+  }
+
   return 'none'
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DETECÇÃO DE ARQUITETURA INTELIGENTE
+// ─────────────────────────────────────────────────────────────────────────────
 
 function detectArchitecture(projectRoot: string, rootNames: string[], workspaces: string[]): Architecture {
-  const dddIndicators = ['domain', 'application', 'infra', 'infrastructure', 'use-cases', 'repositories', 'entities']
-  const mvcIndicators = ['controllers', 'models', 'views', 'routes']
-  const modularIndicators = ['modules', 'features']
-
-  // Checa na raiz
-  let score = checkArchitectureScore(rootNames, dddIndicators, mvcIndicators, modularIndicators)
-  if (score !== 'unknown') return score
-
-  // Checa os nomes dos workspaces (Ex: libs/domain, libs/infrastructure = DDD)
-  const workspaceNames = workspaces.map(w => w.split('/')[1])
-  score = checkArchitectureScore(workspaceNames, dddIndicators, mvcIndicators, modularIndicators)
-  if (score !== 'unknown') return score
-
-  // Entra nos diretórios para checar
-  for (const ws of workspaces) {
-    const wsDir = listDir(path.join(projectRoot, ws), true)
-    if (wsDir.success && wsDir.items) {
-      const names = wsDir.items.map(i => i.name)
-      const s = checkArchitectureScore(names, dddIndicators, mvcIndicators, modularIndicators)
-      if (s !== 'unknown') return s
+  const foldersToAnalyze: string[] = [...rootNames]
+  
+  const baseDirs = ['src', 'app', 'lib']
+  for (const dir of baseDirs) {
+    if (rootNames.includes(dir)) {
+      const scanDir = listDir(path.join(projectRoot, dir))
+      if (scanDir.success && scanDir.items) {
+        foldersToAnalyze.push(...scanDir.items.filter(i => i.type === 'directory').map(i => i.name.toLowerCase()))
+      }
     }
   }
-  return 'unknown'
+
+  foldersToAnalyze.push(...workspaces.map(ws => path.basename(ws).toLowerCase()))
+
+  // Removido o 'core' propositalmente para não causar falsos positivos de DDD no FastAPI
+  if (foldersToAnalyze.some(f => ['domain', 'application', 'infrastructure', 'use-cases'].includes(f))) return 'ddd'
+  if (foldersToAnalyze.some(f => ['modules', 'features'].includes(f))) return 'modular'
+  if (foldersToAnalyze.some(f => ['controllers', 'routes', 'api', 'routers', 'repositories'].includes(f))) return 'mvc'
+  if (foldersToAnalyze.some(f => ['components', 'pages', 'screens', 'hooks', 'store', 'contexts', 'layouts'].includes(f))) return 'component-based'
+
+  return 'simple'
 }
 
-function checkArchitectureScore(names: string[], ddd: string[], mvc: string[], mod: string[]): Architecture {
-  const dddScore = names.filter(n => ddd.includes(n.toLowerCase())).length
-  const mvcScore = names.filter(n => mvc.includes(n.toLowerCase())).length
-  const modScore = names.filter(n => mod.includes(n.toLowerCase())).length
-
-  if (dddScore >= 2) return 'ddd'
-  if (mvcScore >= 2) return 'mvc'
-  if (modScore >= 1) return 'modular'
-  return 'unknown'
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// BUSCA FUZZY
+// ─────────────────────────────────────────────────────────────────────────────
 
 function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfile['examplePaths'] {
   const examples: StackProfile['examplePaths'] = {}
   
-  // Procura arquivos de exemplo na raiz e em todos os workspaces detectados
-  const searchPaths = workspaces.length > 0
-    ? workspaces.map(ws => path.join(projectRoot, ws, 'src'))
-    : [path.join(projectRoot, 'src')]
+  const searchDirs = workspaces.length > 0 
+    ? workspaces.map(ws => {
+        const wsSrc = path.join(projectRoot, ws, 'src')
+        return fs.existsSync(wsSrc) ? wsSrc : path.join(projectRoot, ws)
+      })
+    : [path.join(projectRoot, 'src'), path.join(projectRoot, 'app'), path.join(projectRoot, 'lib'), projectRoot]
 
-  // Padrões de arquivos cruciais em arquiteturas avançadas (como a sua)
-  const targets = [
-    'module', 'service', 'controller', 'entity', 
-    'repository', 'use-case', 'schema', 'vo', 'strategy', 'dto'
+  const patterns = [
+    // Backend
+    { key: 'controller', file: /(controller|router)\.(ts|js|py|php)$/i,           path: /\/(controllers?|routers?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'service',    file: /service\.(ts|js|py|php)$/i,                       path: /\/(services?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'use-case',   file: /use-?case\.(ts|js|py|php)$/i,                     path: /\/(use-?cases?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'port',       file: /ports?\.(ts|js|py|php)$/i,                        path: /\/(ports?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'model',      file: /model\.(ts|js|py|php)$/i,                         path: /\/(models?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'errors',     file: /errors?\.(ts|js|py|php)$/i,                        path: /\/(errors?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'strategies', file: /strategies?\.(ts|js|py|php)$/i,                    path: /\/(strategies?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'entity',     file: /(entity|usuario|postagem|papel)\.(ts|js|py|php)$/i,path: /\/(entities)\/.*\.(ts|js|py|php)$/i },
+    { key: 'repository', file: /repository\.(ts|js|py|php)$/i,                    path: /\/(repositories)\/.*\.(ts|js|py|php)$/i },
+    { key: 'schema',     file: /schema\.(ts|js|py|php)$/i,                        path: /\/(schemas?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'vo',         file: /(vo|value-?object)\.(ts|js|py|php)$/i,            path: /\/(vos?|value-?objects?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'route',      file: /route[s]?\.(ts|js|py|php)$/i,                     path: /\/(routes?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'middleware', file: /middleware\.(ts|js|py|php)$/i,                    path: /\/(middlewares?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'module',     file: /module\.(ts|js|py|php)$/i,                        path: /\/(modules?)\/.*\.(ts|js|py|php)$/i },
+    
+    // Frontend / Mobile
+    { key: 'component',  file: /component\.(ts|tsx|js|jsx|vue|dart)$/i,           path: /\/(components?|widgets?)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
+    { key: 'page',       file: /(page|screen|view)\.(ts|tsx|js|jsx|vue|dart)$/i,  path: /\/(pages?|screens?|views?|app)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
+    { key: 'layout',     file: /layout\.(ts|tsx|js|jsx|vue|dart)$/i,              path: /\/(layouts?)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
+    { key: 'hook',       file: /^use[A-Z].*\.(ts|tsx|js|jsx)$/,                   path: /\/(hooks?)\/.*\.(ts|tsx|js|jsx)$/i },
+    { key: 'store',      file: /(store|slice|context|state)\.(ts|tsx|js|jsx)$/i,  path: /\/(stores?|slices?|contexts?|states?)\/.*\.(ts|tsx|js|jsx)$/i },
+    { key: 'template',   file: /\.html$/i,                                        path: null }
   ]
 
-  for (const searchPath of searchPaths) {
-    const scan = listDir(searchPath, true)
+  for (const dir of searchDirs) {
+    if (!fs.existsSync(dir)) continue
+    
+    const scan = listDir(dir, true) 
     if (!scan.success || !scan.items) continue
 
     for (const item of scan.items) {
       if (item.type !== 'file') continue
-      const name = item.name.toLowerCase()
+      
+      const fileName = item.name
+      
+      // Ignora arquivos de teste
+      if (fileName.includes('.test.') || fileName.includes('.spec.') || fileName.startsWith('test_')) continue
+      
+      // Filtra estritamente por extensões de código aceitas
+      if (!/\.(ts|tsx|js|jsx|py|go|php|vue|dart|html)$/.test(fileName)) continue
+      
+      // TRAVA DE SEGURANÇA: Ignora explicitamente os arquivos de "barril" (exportação) e de inicialização vazios
+      // Permite index.tsx/jsx porque no React/Next/Expo eles são frequentemente componentes de tela reais
+      if (/^(__init__\.py|index\.(ts|js))$/.test(fileName)) continue
 
-      // Associa o arquivo ao tipo se tiver o sufixo correto
-      for (const target of targets) {
-        if (!examples[target] && name.includes(`.${target}.ts`)) {
-          examples[target] = item.path
+      const unixPath = item.path.replace(/\\/g, '/')
+
+      for (const p of patterns) {
+        if (!examples[p.key]) {
+          if (p.file.test(fileName) || (p.path && p.path.test(unixPath))) {
+            examples[p.key] = path.relative(projectRoot, item.path)
+          }
         }
       }
     }
   }
+
   return examples
 }
