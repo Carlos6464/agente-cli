@@ -1,5 +1,5 @@
 const path = require('path')
-import { embed, embedBatch, EMBEDDING_MODEL } from './embeddings'
+import { embedBatch, isEmbeddingModelAvailable, EMBEDDING_MODEL } from './embeddings'
 import { VectorStore, VectorEntry } from './vector-store'
 import { listDir, readFile } from '../tools/filesystem.tools'
 import { LANGUAGE_EXTENSIONS } from '../tools/filesystem.tools'
@@ -45,6 +45,12 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
   const store = new VectorStore(projectRoot)
   const log   = (msg: string) => onProgress?.(msg)
 
+  // 🔴 VERIFICAÇÃO PRÉVIA DE SAÚDE DA IA
+  const healthCheck = await isEmbeddingModelAvailable(baseUrl, model)
+  if (!healthCheck.available) {
+     return { success: false, filesIndexed: 0, chunksCreated: 0, skipped: 0, error: healthCheck.message }
+  }
+
   let filesIndexed  = 0
   let chunksCreated = 0
   let skipped       = 0
@@ -61,7 +67,7 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
       ...LANGUAGE_EXTENSIONS.database,
     ]
 
-    log('Listando arquivos do projeto...')
+    log('A listar arquivos do projeto...')
     const allFiles = listDir(projectRoot, true)
 
     if (!allFiles.success || !allFiles.items) {
@@ -74,9 +80,14 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
       codeExtensions.includes(item.extension)
     )
 
-    log(`${filesToIndex.length} arquivos encontrados para indexar`)
-
     for (const fileItem of filesToIndex) {
+      // Ignora pastas que causam peso no RAG
+      const unixPath = fileItem.path.replace(/\\/g, '/')
+      if (unixPath.includes('/node_modules/') || unixPath.includes('/__pycache__/') || unixPath.includes('/.venv/') || unixPath.includes('/venv/')) {
+        skipped++
+        continue
+      }
+
       if (!forceReindex && store.hasFile(fileItem.path)) {
         skipped++
         continue
@@ -101,15 +112,14 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
         continue
       }
 
-      log(`Indexando ${fileItem.path.replace(projectRoot + '/', '')} (${chunks.length} chunks)`)
+      log(`A indexar ${fileItem.path.replace(projectRoot + '/', '')} (${chunks.length} chunks)`)
 
       const texts  = chunks.map(c => c.content)
       const result = await embedBatch(texts, baseUrl, model)
 
       if (!result.success || !result.vectors) {
-        log(`  ⚠️  Falha ao gerar embeddings: ${result.error}`)
-        skipped++
-        continue
+         // Lança erro fatal se a IA falhar a meio do processo
+         return { success: false, filesIndexed, chunksCreated, skipped, error: result.error }
       }
 
       const entries: VectorEntry[] = chunks.map((chunk, i) => ({
@@ -130,9 +140,6 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
       chunksCreated += chunks.length
     }
 
-    const stats = store.stats()
-    log(`Indexação concluída — ${filesIndexed} arquivos, ${chunksCreated} chunks, ${stats.sizeInKb}kb`)
-
     return { success: true, filesIndexed, chunksCreated, skipped }
 
   } catch (err) {
@@ -141,7 +148,7 @@ export async function indexProject(options: IndexOptions = {}): Promise<IndexRes
       filesIndexed,
       chunksCreated,
       skipped,
-      error: `Erro na indexação: ${(err as Error).message}`
+      error: `Erro fatal na indexação: ${(err as Error).message}`
     }
   }
 }
@@ -153,6 +160,11 @@ export async function indexFile(
   model:       string = EMBEDDING_MODEL
 ): Promise<{ success: boolean; chunksCreated: number; error?: string }> {
   try {
+    const healthCheck = await isEmbeddingModelAvailable(baseUrl, model)
+    if (!healthCheck.available) {
+       return { success: false, chunksCreated: 0, error: healthCheck.message }
+    }
+
     const store       = new VectorStore(projectRoot)
     const fileContent = readFile(filePath)
 

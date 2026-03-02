@@ -1,5 +1,6 @@
 import chalk from 'chalk'
 import ora   from 'ora'
+import os    from 'os' // Importação do OS para detectar a plataforma
 const inquirer  = require('inquirer')
 const { spawn } = require('child_process')
 const fs        = require('fs')
@@ -36,24 +37,23 @@ function getMonorepoRules(monorepo: string, pm: string): string {
   if (monorepo === 'none' || monorepo === 'unknown') return ''
   
   return `
-2. REGRAS DE EXECUÇÃO EM MONOREPO (Ativo: ${monorepo.toUpperCase()} via ${pm}):
-   - NUNCA misture argumentos de escopo do gerenciador de pacotes (${pm} --filter / --workspace) com a chamada da ferramenta do monorepo.
-   - Sempre use a sintaxe oficial e direta da ferramenta via npx:
-     * Turborepo: npx turbo run <comando> --filter=<nome_do_pacote>
-     * Nx: npx nx run <nome_do_pacote>:<comando>  OU  npx nx <comando> <nome_do_pacote>
-     * Lerna: npx lerna run <comando> --scope=<nome_do_pacote>
+REGRAS DE EXECUÇÃO EM MONOREPO (Ativo: ${monorepo.toUpperCase()} via ${pm}):
+- NUNCA misture argumentos de escopo do gerenciador de pacotes (${pm} --filter / --workspace) com a chamada da ferramenta do monorepo.
+- Sempre use a sintaxe oficial e direta da ferramenta via npx:
+  * Turborepo: npx turbo run <comando> --filter=<nome_do_pacote>
+  * Nx: npx nx run <nome_do_pacote>:<comando>  OU  npx nx <comando> <nome_do_pacote>
+  * Lerna: npx lerna run <comando> --scope=<nome_do_pacote>
 `.trim()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COMUNICAÇÃO COM O LLM
+// COMUNICAÇÃO COM O LLM (AGORA COM CONSCIÊNCIA DE SISTEMA OPERATIVO)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function askLLMForCommand(intent: string, projectRoot: string, config: any): Promise<string | null> {
   const retrieved = await retrieve(`comando para ${intent} scripts turbo nx lerna package`, projectRoot, { topK: 5 })
   let filesContext = retrieved.success && retrieved.contexts ? retrieved.contexts.map(c => `### ${c.filePath}\n\`\`\`\n${c.content}\n\`\`\``).join('\n\n') : ''
   
-  // A MÁGICA AQUI: Mapeamento exato de todos os pacotes do monorepo
   let workspacesContext = ''
   if (config.profile.apps && config.profile.apps.length > 0) {
     const mappings = config.profile.apps.map((appPath: string) => {
@@ -70,20 +70,48 @@ async function askLLMForCommand(intent: string, projectRoot: string, config: any
 
   const monorepoRules = getMonorepoRules(config.profile.monorepo, config.profile.packageManager)
 
+  // ---------------------------------------------------------------------------
+  // DETECÇÃO DE SISTEMA OPERATIVO
+  // ---------------------------------------------------------------------------
+  const isWindows = process.platform === 'win32';
+  const osName = isWindows ? 'Windows (PowerShell)' : 'Linux/Mac (Bash)';
+
+  const fileCreationRule = isWindows
+    ? `3. PARA CRIAR ARQUIVOS NO WINDOWS (PowerShell):
+   Use New-Item para criar pastas e arquivos. Use Set-Content com Here-Strings (@" ... "@) para inserir o código.
+   Atenção: A aspa dupla de fechamento "@ DEVE ficar no início absoluto da linha!
+   Exemplo Correto:
+   New-Item -ItemType Directory -Force -Path "app/models" | Out-Null
+   Set-Content -Path "app/models/anexo_model.py" -Value @"
+from sqlalchemy import Column
+"@`
+    : `3. PARA CRIAR ARQUIVOS NO LINUX/MAC (Bash):
+   Use mkdir -p para pastas e cat com EOF para arquivos.
+   Exemplo Correto:
+   mkdir -p app/models
+   cat << 'EOF' > app/models/anexo_model.py
+from sqlalchemy import Column
+EOF`;
+
   const messages: LLMMessage[] = [
     { 
       role: 'system', 
-      content: `Você é um Engenheiro DevOps especialista em CLIs.
+      content: `Você é um Engenheiro de Software Sênior, expert em terminal ${osName} e dev de arquiteturas escaláveis.
 Arquitetura atual: ${config.profile.architecturalSummary || 'Desconhecida'}.
 ${workspacesContext}
 
-REGRAS OBRIGATÓRIAS:
-1. Responda APENAS com o comando exato de terminal, sem formatação markdown (sem \`\`\`), sem explicações.
+REGRAS ESTRITAS E OBRIGATÓRIAS DE TERMINAL:
+1. Você DEVE gerar APENAS comandos válidos nativos para ${osName}.
+2. NUNCA invente ferramentas que não existem (NÃO use 'create-file', 'append-file', 'write', etc).
+${fileCreationRule}
+4. PARA MÚLTIPLOS ARQUIVOS OU COMANDOS: Escreva os comandos sequencialmente linha por linha.
+5. Responda APENAS com o código puro do terminal, sem formatação markdown (sem envolver em \`\`\`), sem explicações de texto.
+
 ${monorepoRules}` 
     },
     { 
       role: 'user', 
-      content: `Arquivos relevantes lidos do projeto:\n${filesContext}\n\nEscreva APENAS o comando exato para a seguinte ação: ${intent}` 
+      content: `Arquivos relevantes lidos do projeto via RAG:\n${filesContext}\n\nEscreva APENAS o script de terminal (${osName}) para a seguinte ação (linhas separadas sequenciais): ${intent}` 
     }
   ]
   
@@ -93,7 +121,6 @@ ${monorepoRules}`
     
     let cmd = result.content.trim()
     
-    // Filtro de limpeza infalível para blocos Markdown ou sobras de bash
     const codeBlockMatch = cmd.match(/```[a-z]*\n([\s\S]+?)\n```/i) || cmd.match(/```([\s\S]+?)```/i)
     if (codeBlockMatch) {
         cmd = codeBlockMatch[1].trim()
@@ -101,6 +128,7 @@ ${monorepoRules}`
         cmd = cmd.replace(/`/g, '').trim()
         if (cmd.toLowerCase().startsWith('bash\n')) cmd = cmd.substring(5).trim()
         if (cmd.toLowerCase().startsWith('sh\n')) cmd = cmd.substring(3).trim()
+        if (cmd.toLowerCase().startsWith('powershell\n')) cmd = cmd.substring(10).trim()
     }
     
     return cmd
@@ -139,12 +167,12 @@ export async function runRun(options: { projectRoot?: string } = {}) {
   let finalCommand = selected
   if (selected === '__describe__') {
     const { intent } = await inquirer.prompt([{ type: 'input', name: 'intent', message: 'Descreva a ação que deseja realizar:' }])
-    const spinner = ora('Analisando arquitetura e pacotes via RAG...').start()
+    const spinner = ora('Analisando arquitetura e contextos via RAG...').start()
     const cmd = await askLLMForCommand(intent, projectRoot, config)
     spinner.stop()
     
     if (cmd) { 
-      console.log(chalk.green(`  Comando descoberto: ${chalk.white(cmd)}`))
+      console.log(chalk.green(`  Comando descoberto (${process.platform === 'win32' ? 'PowerShell' : 'Bash'}):\n${chalk.white(cmd)}`))
       finalCommand = cmd 
     } else { 
       console.log(chalk.yellow('\n  ⚠️ Não consegui gerar o comando automaticamente.'))
@@ -152,15 +180,21 @@ export async function runRun(options: { projectRoot?: string } = {}) {
     }
   }
 
-  const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message: `Executar $ ${finalCommand}?`, default: true }])
+  const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message: `Executar o comando acima?`, default: true }])
   if (!ok) {
     console.log(chalk.gray('  Cancelado.\n'))
     process.exit(0)
   }
 
   console.log(chalk.gray('  ' + '─'.repeat(50)))
+  
+  // ---------------------------------------------------------------------------
+  // O SEGREDO DA EXECUÇÃO CROSS-PLATFORM: Configuração Dinâmica da Shell
+  // ---------------------------------------------------------------------------
+  const shellConfig = process.platform === 'win32' ? 'powershell.exe' : true;
+  
   const exitCode = await new Promise(res => { 
-    spawn(finalCommand, [], { cwd: projectRoot, stdio: 'inherit', shell: true })
+    spawn(finalCommand, [], { cwd: projectRoot, stdio: 'inherit', shell: shellConfig })
       .on('close', res)
       .on('error', () => res(1)) 
   })
@@ -169,7 +203,7 @@ export async function runRun(options: { projectRoot?: string } = {}) {
   if (exitCode !== 0 && (await inquirer.prompt([{ type: 'confirm', name: 'a', message: 'Analisar erro com a IA?', default: true }])).a) {
     const spinner = ora('Analisando o erro...').start()
     const result = await ProviderFactory.create(config.ai).complete([
-      { role: 'system', content: `Você é um desenvolvedor corrigindo um erro em um monorepo ${config.profile.monorepo}. Analise a falha e diga o que fazer.` }, 
+      { role: 'system', content: `Você é um desenvolvedor corrigindo um erro em um projeto ${config.profile.architecture}. Analise a falha de terminal e diga o que fazer para corrigir.` }, 
       { role: 'user', content: `O comando falhou: ${finalCommand}` }
     ])
     spinner.stop()
@@ -181,6 +215,6 @@ export async function runRun(options: { projectRoot?: string } = {}) {
 
 export function runCommand(): Command {
   return new Command('run')
-    .description('Executa scripts descobrindo comandos ocultos e arquiteturas complexas')
+    .description('Executa tarefas gerando e rodando comandos (ex: criar CRUDs)')
     .action(async () => await runRun())
 }

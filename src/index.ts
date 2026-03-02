@@ -15,7 +15,7 @@ program
   .description(chalk.bold('🤖 Agent CLI') + '\nAgente inteligente adaptável a qualquer stack')
   .version('0.1.0')
 
-program.addCommand(newCommand())
+// program.addCommand(newCommand())
 program.addCommand(initCommand())
 program.addCommand(generateCommand())
 program.addCommand(runCommand())

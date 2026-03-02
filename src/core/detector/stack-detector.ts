@@ -60,10 +60,10 @@ export function detectStack(projectRoot: string): DetectionResult {
       backend: detectBackend(names, projectRoot, allDeps, workspaces),
       frontend: detectFrontend(names, allDeps),
       mobile: detectMobile(allDeps),
-      orm: detectORM(names, projectRoot, allDeps),
-      database: detectDatabase(names, projectRoot, allDeps),
+      orm: detectORM(names, projectRoot, allDeps, workspaces),
+      database: detectDatabase(names, projectRoot, allDeps, workspaces),
       architecture: detectArchitecture(projectRoot, names, workspaces),
-      testing: detectTesting(names, projectRoot, allDeps),
+      testing: detectTesting(names, projectRoot, allDeps, workspaces),
       docker: detectDocker(names),
       apps: workspaces,
       ambiguities: [],
@@ -146,10 +146,10 @@ function detectBackend(names: string[], projectRoot: string, allDeps: string[], 
   if (allDeps.includes('@nestjs/core') || names.includes('nest-cli.json')) return 'nestjs'
   if (names.includes('artisan')) return 'laravel'
 
-  if (names.includes('requirements.txt')) {
-    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+  const dirsToCheck = [projectRoot, ...workspaces.map(w => path.join(projectRoot, w))]
+  for (const dir of dirsToCheck) {
+    const req = readFile(path.join(dir, 'requirements.txt'))
     if (req.success && req.content && req.content.toLowerCase().includes('fastapi')) return 'fastapi'
-    return 'none'
   }
 
   if (allDeps.includes('fastify')) return 'fastify'
@@ -178,20 +178,21 @@ function detectMobile(allDeps: string[]): StackProfile['mobile'] {
   return 'none'
 }
 
-function detectORM(names: string[], projectRoot: string, allDeps: string[]): StackProfile['orm'] {
+function detectORM(names: string[], projectRoot: string, allDeps: string[], workspaces: string[]): StackProfile['orm'] {
   if (allDeps.includes('drizzle-orm') || names.includes('drizzle.config.ts')) return 'drizzle'
   if (allDeps.includes('@prisma/client') || names.includes('prisma')) return 'prisma'
   if (allDeps.includes('typeorm')) return 'typeorm'
   
-  if (names.includes('requirements.txt')) {
-    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+  const dirsToCheck = [projectRoot, ...workspaces.map(w => path.join(projectRoot, w))]
+  for (const dir of dirsToCheck) {
+    const req = readFile(path.join(dir, 'requirements.txt'))
     if (req.success && req.content && req.content.toLowerCase().includes('sqlalchemy')) return 'sqlalchemy'
   }
 
   return 'none'
 }
 
-function detectDatabase(names: string[], projectRoot: string, allDeps: string[]): StackProfile['database'] {
+function detectDatabase(names: string[], projectRoot: string, allDeps: string[], workspaces: string[]): StackProfile['database'] {
   if (allDeps.includes('pg') || allDeps.includes('postgres') || allDeps.includes('@types/pg')) return 'postgresql'
   if (allDeps.includes('mysql') || allDeps.includes('mysql2')) return 'mysql'
   if (allDeps.includes('mongoose') || allDeps.includes('mongodb')) return 'mongodb'
@@ -208,8 +209,9 @@ function detectDatabase(names: string[], projectRoot: string, allDeps: string[])
     }
   }
 
-  if (names.includes('requirements.txt')) {
-    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+  const dirsToCheck = [projectRoot, ...workspaces.map(w => path.join(projectRoot, w))]
+  for (const dir of dirsToCheck) {
+    const req = readFile(path.join(dir, 'requirements.txt'))
     if (req.success && req.content) {
       const content = req.content.toLowerCase()
       if (content.includes('psycopg2') || content.includes('asyncpg')) return 'postgresql'
@@ -233,15 +235,16 @@ function detectDatabase(names: string[], projectRoot: string, allDeps: string[])
   return 'unknown' 
 }
 
-function detectTesting(names: string[], projectRoot: string, allDeps: string[]): StackProfile['testing'] {
+function detectTesting(names: string[], projectRoot: string, allDeps: string[], workspaces: string[]): StackProfile['testing'] {
   if (allDeps.includes('cypress')) return 'cypress'
   if (allDeps.includes('@playwright/test')) return 'playwright'
   if (allDeps.includes('jest') || names.includes('jest.config.ts') || names.includes('jest.config.js')) return 'jest'
   if (allDeps.includes('vitest') || names.includes('vitest.config.ts')) return 'vitest'
   if (names.includes('pytest.ini') || names.includes('conftest.py')) return 'pytest'
   
-  if (names.includes('requirements.txt')) {
-    const req = readFile(path.join(projectRoot, 'requirements.txt'))
+  const dirsToCheck = [projectRoot, ...workspaces.map(w => path.join(projectRoot, w))]
+  for (const dir of dirsToCheck) {
+    const req = readFile(path.join(dir, 'requirements.txt'))
     if (req.success && req.content && req.content.toLowerCase().includes('pytest')) return 'pytest'
   }
 
@@ -266,12 +269,17 @@ function detectArchitecture(projectRoot: string, rootNames: string[], workspaces
   const foldersToAnalyze: string[] = [...rootNames]
   
   const baseDirs = ['src', 'app', 'lib']
-  for (const dir of baseDirs) {
-    if (rootNames.includes(dir)) {
-      const scanDir = listDir(path.join(projectRoot, dir))
-      if (scanDir.success && scanDir.items) {
-        foldersToAnalyze.push(...scanDir.items.filter(i => i.type === 'directory').map(i => i.name.toLowerCase()))
-      }
+  const allDirsToScan = [...baseDirs]
+  for (const ws of workspaces) {
+    allDirsToScan.push(path.join(ws, 'src'))
+    allDirsToScan.push(path.join(ws, 'app'))
+    allDirsToScan.push(path.join(ws, 'lib'))
+  }
+
+  for (const dir of allDirsToScan) {
+    const scanDir = listDir(path.join(projectRoot, dir))
+    if (scanDir.success && scanDir.items) {
+      foldersToAnalyze.push(...scanDir.items.filter(i => i.type === 'directory').map(i => i.name.toLowerCase()))
     }
   }
 
@@ -286,25 +294,42 @@ function detectArchitecture(projectRoot: string, rootNames: string[], workspaces
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BUSCA FUZZY
+// BUSCA FUZZY - CORRIGIDA (PROCURA MÚLTIPLAS PASTAS SIMULTANEAMENTE)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfile['examplePaths'] {
   const examples: StackProfile['examplePaths'] = {}
   
-  const searchDirs = workspaces.length > 0 
-    ? workspaces.map(ws => {
-        const wsSrc = path.join(projectRoot, ws, 'src')
-        return fs.existsSync(wsSrc) ? wsSrc : path.join(projectRoot, ws)
-      })
-    : [path.join(projectRoot, 'src'), path.join(projectRoot, 'app'), path.join(projectRoot, 'lib'), projectRoot]
+  let searchDirs: string[] = []
 
-  // Para o Dockerfile, incluímos a raiz (projectRoot) explicitamente, já que eles costumam estar lá
-  searchDirs.push(projectRoot)
+  // A CORREÇÃO MESTRA: Agora ele garante que procura em app/ E src/ ao mesmo tempo, sem que um bloqueie o outro.
+  if (workspaces.length > 0) {
+    workspaces.forEach(ws => {
+      const wsPath = path.join(projectRoot, ws)
+      searchDirs.push(wsPath)
+      
+      const wsSrc = path.join(wsPath, 'src')
+      if (fs.existsSync(wsSrc)) searchDirs.push(wsSrc)
+      
+      const wsApp = path.join(wsPath, 'app')
+      if (fs.existsSync(wsApp)) searchDirs.push(wsApp)
+      
+      const wsLib = path.join(wsPath, 'lib')
+      if (fs.existsSync(wsLib)) searchDirs.push(wsLib)
+    })
+  } else {
+    searchDirs = [
+      path.join(projectRoot, 'src'), 
+      path.join(projectRoot, 'app'), 
+      path.join(projectRoot, 'lib')
+    ]
+  }
+
+  searchDirs.push(projectRoot) // Raiz
+  searchDirs = [...new Set(searchDirs)] // Remove duplicados
 
   const patterns = [
-    // Backend
-    { key: 'controller', file: /(controller|router)\.(ts|js|py|php)$/i,           path: /\/(controllers?|routers?)\/.*\.(ts|js|py|php)$/i },
+    { key: 'controller', file: /(controller|router)\.(ts|js|py|php)$/i,           path: /\/(controllers?|routers?|api)\/.*\.(ts|js|py|php)$/i },
     { key: 'service',    file: /service\.(ts|js|py|php)$/i,                       path: /\/(services?)\/.*\.(ts|js|py|php)$/i },
     { key: 'use-case',   file: /use-?case\.(ts|js|py|php)$/i,                     path: /\/(use-?cases?)\/.*\.(ts|js|py|php)$/i },
     { key: 'port',       file: /ports?\.(ts|js|py|php)$/i,                        path: /\/(ports?)\/.*\.(ts|js|py|php)$/i },
@@ -316,16 +341,12 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
     { key: 'route',      file: /route[s]?\.(ts|js|py|php)$/i,                     path: /\/(routes?)\/.*\.(ts|js|py|php)$/i },
     { key: 'middleware', file: /middleware\.(ts|js|py|php)$/i,                    path: /\/(middlewares?)\/.*\.(ts|js|py|php)$/i },
     { key: 'module',     file: /module\.(ts|js|py|php)$/i,                        path: /\/(modules?)\/.*\.(ts|js|py|php)$/i },
-    
-    // Frontend / Mobile
     { key: 'component',  file: /component\.(ts|tsx|js|jsx|vue|dart)$/i,           path: /\/(components?|widgets?)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
     { key: 'page',       file: /(page|screen|view)\.(ts|tsx|js|jsx|vue|dart)$/i,  path: /\/(pages?|screens?|views?|app)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
     { key: 'layout',     file: /layout\.(ts|tsx|js|jsx|vue|dart)$/i,              path: /\/(layouts?)\/.*\.(ts|tsx|js|jsx|vue|dart)$/i },
     { key: 'hook',       file: /^use[A-Z].*\.(ts|tsx|js|jsx)$/,                   path: /\/(hooks?)\/.*\.(ts|tsx|js|jsx)$/i },
     { key: 'store',      file: /(store|slice|context|state)\.(ts|tsx|js|jsx)$/i,  path: /\/(stores?|slices?|contexts?|states?)\/.*\.(ts|tsx|js|jsx)$/i },
     { key: 'template',   file: /\.html$/i,                                        path: null },
-
-    // DOCKER INFRASTRUCTURE
     { key: 'dockerfile', file: /^dockerfile$/i,                                   path: null },
     { key: 'compose',    file: /^docker-compose.*\.(yml|yaml)$/i,                 path: null }
   ]
@@ -342,13 +363,12 @@ function findExamplePaths(projectRoot: string, workspaces: string[]): StackProfi
       const fileName = item.name
       
       if (fileName.includes('.test.') || fileName.includes('.spec.') || fileName.startsWith('test_')) continue
-      
-      // Expandimos para ler os ficheiros do Docker
       if (!/\.(ts|tsx|js|jsx|py|go|php|vue|dart|html|yml|yaml)$/i.test(fileName) && fileName.toLowerCase() !== 'dockerfile') continue
       
-      if (/^(__init__\.py|index\.(ts|js))$/.test(fileName)) continue
-
       const unixPath = item.path.replace(/\\/g, '/')
+      if (unixPath.includes('/.venv/') || unixPath.includes('/venv/') || unixPath.includes('/__pycache__/')) continue
+      if (unixPath.includes('/node_modules/') || unixPath.includes('/dist/') || unixPath.includes('/build/')) continue
+      if (/^(__init__\.py|index\.(ts|js))$/.test(fileName)) continue
 
       for (const p of patterns) {
         if (!examples[p.key]) {

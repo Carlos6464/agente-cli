@@ -84,8 +84,8 @@ export async function runInit(options: { reindex?: boolean; projectRoot?: string
       { type: 'list', name: 'providerChoice', message: 'Provedor Cloud:', choices: [ { name: 'Google Gemini', value: 'gemini' } ] },
       { type: 'password', name: 'apiKey', message: 'API Key (Salva apenas localmente):', validate: (v: string) => v.length > 5 || 'Inválido' }
     ])
-    // CORREÇÃO: Usando a nova versão da API
-    aiConfig = { provider: providerChoice, apiKey, defaultModel: 'gemini-2.5-flash', embeddingModel: 'text-embedding-004' }
+    // AQUI OCORRE A MÁGICA: Alterado de text-embedding-004 para gemini-embedding-001
+    aiConfig = { provider: providerChoice, apiKey, defaultModel: 'gemini-2.5-flash', embeddingModel: 'gemini-embedding-001' }
   }
 
   const detectSpinner = ora('Detectando stack (Varredura de Monorepo)...').start()
@@ -138,25 +138,35 @@ export async function runInit(options: { reindex?: boolean; projectRoot?: string
     archSpinner.warn(`Análise arquitetural avançada falhou: ${(e as Error).message}`)
   }
 
+  const config: AgentConfig = { version: '1.0.0', createdAt: new Date().toISOString(), projectRoot, profile, ai: aiConfig }
+  saveConfig(config, projectRoot)
+  ensureGitignore(projectRoot)
+
   console.log('')
   const { confirmed } = await inquirer.prompt([{
     type: 'confirm', name: 'confirmed', message: 'Iniciar indexação do projeto no RAG?', default: true
   }])
 
-  if (!confirmed) {
-    console.log(chalk.gray('\n  Cancelado.\n'))
-    process.exit(0)
+  if (confirmed) {
+    console.log('')
+    const indexSpinner = ora('Indexando código (Isso pode demorar um pouco)...').start()
+    
+    const indexResult = await indexProject({ 
+      projectRoot, 
+      model: aiConfig.embeddingModel, 
+      forceReindex: isReindex, 
+      onProgress: (msg) => { indexSpinner.text = msg } 
+    })
+    
+    if (indexResult.success) {
+      indexSpinner.succeed(`Indexação concluída: ${indexResult.chunksCreated} chunks armazenados`)
+    } else {
+      indexSpinner.fail(`Falha na indexação: ${indexResult.error}`)
+    }
+  } else {
+    console.log(chalk.gray('\n  Indexação ignorada. (Pode usar "agent init --reindex" mais tarde).'))
   }
 
-  console.log('')
-  const indexSpinner = ora('Indexando código (Isso pode demorar um pouco)...').start()
-  const indexResult = await indexProject({ projectRoot, forceReindex: isReindex, onProgress: (msg) => { indexSpinner.text = msg } })
-  indexResult.success ? indexSpinner.succeed(`Indexação concluída: ${indexResult.chunksCreated} chunks armazenados`) : indexSpinner.warn('Falha na indexação.')
-
-  const config: AgentConfig = { version: '1.0.0', createdAt: new Date().toISOString(), projectRoot, profile, ai: aiConfig }
-  saveConfig(config, projectRoot)
-  ensureGitignore(projectRoot)
-  
   console.log(chalk.bold.green('\n  ✅ Projeto inicializado com sucesso!\n'))
   console.log(chalk.bold('  Próximos passos:'))
   console.log(chalk.white('  agent generate <tipo> <nome>') + chalk.gray('  — gera código'))
