@@ -6,7 +6,7 @@ import { Command } from 'commander'
 import { loadConfig, hasConfig } from './init'
 import { runAgent, AgentStep } from '../core/agent/agent-core'
 import { indexFile } from '../rag/indexer'
-import { loadPattern, listPatterns, PatternEntry } from './pattern'
+import { loadPattern, listPatterns, PatternEntry, formatPatternForInstruction } from './pattern'
 
 export async function runGenerate(options: {
   tipo: string
@@ -46,7 +46,6 @@ export async function runGenerate(options: {
     resolvedPattern = loadPattern(options.usePattern, projectRoot)
 
     if (!resolvedPattern) {
-      // Padrão não encontrado — lista os disponíveis e pergunta o que fazer
       const available = listPatterns(projectRoot)
 
       console.log(chalk.red(`  ❌ Padrão "${options.usePattern}" não encontrado.\n`))
@@ -74,7 +73,8 @@ export async function runGenerate(options: {
         }
       } else {
         console.log(chalk.gray('  Nenhum padrão salvo ainda.'))
-        console.log(chalk.gray('  Use: agent pattern save <nome> --file <arquivo>\n'))
+        console.log(chalk.gray('  Use: agent pattern save <nome> --file <arquivo>'))
+        console.log(chalk.gray('  Ou:  agent pattern save <nome> --files "<arq1>, <arq2>"\n'))
 
         const { continueWithout } = await inquirer.prompt([{
           type:    'confirm',
@@ -87,8 +87,22 @@ export async function runGenerate(options: {
     }
 
     if (resolvedPattern) {
-      console.log(chalk.green(`  📌 Padrão carregado: ${chalk.white(resolvedPattern.name)}`))
-      console.log(chalk.gray(`     Referência: ${resolvedPattern.sourceFile} (${resolvedPattern.content.split('\n').length} linhas)\n`))
+      // Detecta se é multi-arquivo para exibir feedback correto
+      const isMulti = resolvedPattern.files && resolvedPattern.files.length > 1
+
+      console.log(chalk.green(`  📌 Padrão carregado: ${chalk.white(resolvedPattern.name)}`) +
+        (isMulti ? chalk.cyan('  [multi-arquivo]') : ''))
+
+      if (isMulti && resolvedPattern.files) {
+        resolvedPattern.files.forEach(f => {
+          const lines = f.content.split('\n').length
+          console.log(chalk.gray(`     • [${f.role}] ${f.sourcePath} (${lines} linhas)`))
+        })
+      } else if (resolvedPattern.sourceFile) {
+        const lines = (resolvedPattern.content || '').split('\n').length
+        console.log(chalk.gray(`     Referência: ${resolvedPattern.sourceFile} (${lines} linhas)`))
+      }
+      console.log('')
     }
   }
 
@@ -109,7 +123,7 @@ export async function runGenerate(options: {
     context || null,
     exemploDoTipo,
     exemplosFound,
-    resolvedPattern   // ← NOVO: padrão explícito tem prioridade máxima
+    resolvedPattern
   )
 
   console.log(chalk.gray(`  Instrução preparada para o Agente...\n`))
@@ -202,7 +216,8 @@ export async function runGenerate(options: {
 // BUILD INSTRUCTION
 //
 // Hierarquia de referências (da mais para a menos autoritativa):
-//   1. --use-pattern  → padrão explícito aprovado por você (prioridade MÁXIMA)
+//   1. --use-pattern  → padrão explícito aprovado (prioridade MÁXIMA)
+//                       suporta multi-arquivo via formatPatternForInstruction()
 //   2. examplePaths   → arquivos detectados automaticamente pelo Stack Detector
 //   3. --context      → campos, regras de negócio, especificações
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,7 +229,7 @@ function buildInstruction(
   context:        string | null,
   exemploDoTipo:  string | null,
   todosExemplos:  string | null,
-  pattern:        PatternEntry | null     // NOVO
+  pattern:        PatternEntry | null
 ): string {
   const partes: string[] = []
 
@@ -222,29 +237,27 @@ function buildInstruction(
 
   // ── 1. PADRÃO EXPLÍCITO (prioridade máxima) ───────────────────────────────
   // Quando o usuário passou --use-pattern, esse bloco substitui qualquer
-  // busca por referência. O LLM não deve inventar — deve copiar e adaptar.
+  // busca por referência. Suporta 1 ou N arquivos transparentemente.
 
   if (pattern) {
-    partes.push(`
-⚠️  PADRÃO OBRIGATÓRIO — MÁXIMA PRIORIDADE:
-O usuário selecionou explicitamente o padrão "${pattern.name}" como referência.
-${pattern.description ? `Descrição: ${pattern.description}` : ''}
-Arquivo de origem: ${pattern.sourceFile}
-
-Este é o código aprovado que você DEVE seguir para estrutura, imports, estilo e lógica:
-
-\`\`\`
-${pattern.content}
-\`\`\`
-
-REGRAS ao usar este padrão:
-- Copie a estrutura, imports e convenções EXATAMENTE como estão acima.
-- Adapte apenas: nomes de classes/funções para "${nome}", campos específicos do domínio.
-- NÃO substitua bibliotecas, ORMs, frameworks ou estilos que você vê no padrão.
-- NÃO use padrões genéricos do seu treinamento — use o que está acima.`)
+    partes.push('\n' + formatPatternForInstruction(pattern))
   }
 
   // ── 2. CONTEXTO / ESPECIFICAÇÃO ───────────────────────────────────────────
+
+
+  // Quando padrão + contexto coexistem, deixa explícito que os campos
+  // do contexto SUBSTITUEM os do padrão — não complementam.
+  // Sem isso o LLM pode manter os campos do arquivo original (ex: problema.nome)
+  // em vez de usar os campos especificados pelo usuário.
+  if (pattern && context) {
+    partes.push(`
+⚠️  ADAPTAÇÃO OBRIGATÓRIA DOS CAMPOS:
+O padrão acima usa campos do módulo original apenas como exemplo de ESTRUTURA.
+Você DEVE substituir esses campos pelos especificados no CONTEXTO abaixo.
+Regra: mantenha a lógica (filter, ilike, offset, limit, etc), troque apenas os nomes dos campos e colunas.
+NÃO misture campos do padrão original com os do contexto.`)
+  }
 
   if (context) {
     const tipoNorm = tipo.toLowerCase()
@@ -274,8 +287,8 @@ REGRAS ao usar este padrão:
       partes.push(`\nOutros arquivos de referência:\n${todosExemplos}`)
     }
   } else {
-    // Com padrão explícito, ainda pedimos verificação de localização
-    partes.push(`\nETAPA OBRIGATÓRIA 1 — O padrão já foi fornecido acima. Use read_file APENAS para confirmar o local correto onde o arquivo deve ser criado.`)
+    // Com padrão explícito, só verifica localização
+    partes.push(`\nETAPA OBRIGATÓRIA 1 — O padrão já foi fornecido acima. Use read_file APENAS para confirmar o local correto onde o(s) arquivo(s) deve(m) ser criado(s).`)
   }
 
   partes.push(`\nETAPA 2 — LOCAL CORRETO: Use list_dir para confirmar onde o arquivo deve ser criado seguindo o padrão do projeto.`)

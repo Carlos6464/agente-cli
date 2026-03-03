@@ -10,6 +10,7 @@ import { chatCommand }     from './commands/chat'
 import { indexCommand }    from './commands/index-cmd'
 import { modelCommand }    from './commands/model'
 import { patternCommand }  from './commands/pattern'
+import { editCommand } from './commands/edit'
 
 const program = new Command()
 
@@ -26,6 +27,7 @@ program.addCommand(runCommand())
 program.addCommand(chatCommand())
 program.addCommand(modelCommand())
 program.addCommand(patternCommand())
+program.addCommand(editCommand())
 
 if (!process.argv.slice(2).length) {
   program.outputHelp()

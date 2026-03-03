@@ -10,6 +10,7 @@ import { ProviderFactory } from '../providers/provider.factory'
 import { buildContext } from '../core/context-builder/context-builder'
 import { LLMMessage } from '../providers/llm-provider.interface'
 import { runAgent } from '../core/agent/agent-core'
+import { loadPattern, listPatterns, formatPatternForInstruction } from './pattern'
 
 const MAX_HISTORY = 20
 
@@ -26,9 +27,7 @@ function loadHistory(projectRoot: string): LLMMessage[] {
   try {
     const data = fs.readFileSync(historyPath, 'utf-8')
     const parsed = JSON.parse(data)
-    if (Array.isArray(parsed)) {
-      return parsed
-    }
+    if (Array.isArray(parsed)) return parsed
     return []
   } catch (err) {
     console.log(chalk.yellow(`\n  ⚠️  Aviso: Não foi possível ler o histórico anterior. Iniciando nova sessão.\n`))
@@ -45,7 +44,6 @@ function saveHistory(projectRoot: string, messages: LLMMessage[]): void {
   }
 
   try {
-    // Salva as últimas 100 mensagens para não inchar o arquivo no disco infinitamente
     const toSave = messages.slice(-100)
     fs.writeFileSync(historyPath, JSON.stringify(toSave, null, 2), 'utf-8')
   } catch (err) {
@@ -53,6 +51,37 @@ function saveHistory(projectRoot: string, messages: LLMMessage[]): void {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PARSE DE FLAGS DO /agir
+//
+// Extrai flags especiais antes de enviar a instrução ao agente.
+// Flags suportadas:
+//   --pattern <nome>  → injeta um padrão salvo como referência obrigatória
+//
+// Exemplo:
+//   /agir --pattern filtro-paginacao adicionar filtro por razao_social no service de oficina
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ParsedAgirFlags {
+  patternName:      string | null
+  cleanInstruction: string
+}
+
+function parseAgirFlags(rawInstruction: string): ParsedAgirFlags {
+  const patternMatch = rawInstruction.match(/--pattern\s+(\S+)/)
+
+  if (!patternMatch) {
+    return { patternName: null, cleanInstruction: rawInstruction }
+  }
+
+  return {
+    patternName:      patternMatch[1],
+    cleanInstruction: rawInstruction.replace(patternMatch[0], '').trim()
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPORT PRINCIPAL
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runChat(options: { projectRoot?: string } = {}) {
@@ -76,16 +105,17 @@ export async function runChat(options: { projectRoot?: string } = {}) {
 
   spinner.succeed(`Conectado — ${config.ai.provider} (${config.ai.defaultModel})`)
 
-  // CARREGA O HISTÓRICO SALVO
   const sessionMessages: LLMMessage[] = loadHistory(projectRoot)
   if (sessionMessages.length > 0) {
-    console.log(chalk.green(`  📚 Histórico carregado (${sessionMessages.length} mensagens). O agente lembrará do contexto passado.`))
+    console.log(chalk.green(`  📚 Histórico carregado (${sessionMessages.length} mensagens).`))
   }
 
   console.log(chalk.gray('\n  Comandos disponíveis:'))
-  console.log(chalk.gray('  /agir <instrução> ') + chalk.white('— O agente usa ferramentas para ler/criar/editar código'))
-  console.log(chalk.gray('  /limpar           ') + chalk.white('— Esquece a conversa atual e limpa o histórico'))
-  console.log(chalk.gray('  /sair             ') + chalk.white('— Encerra a conversa e salva o histórico\n'))
+  console.log(chalk.gray('  /agir <instrução>                    ') + chalk.white('— Agente lê/cria/edita código'))
+  console.log(chalk.gray('  /agir --pattern <nome> <instrução>   ') + chalk.white('— Usa padrão salvo como referência'))
+  console.log(chalk.gray('  /limpar                              ') + chalk.white('— Limpa o histórico'))
+  console.log(chalk.gray('  /padroes                             ') + chalk.white('— Lista padrões disponíveis'))
+  console.log(chalk.gray('  /sair                                ') + chalk.white('— Encerra e salva histórico\n'))
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -93,7 +123,6 @@ export async function runChat(options: { projectRoot?: string } = {}) {
     prompt: chalk.cyan('  você › ')
   })
 
-  // INTERCEPTA O CTRL+C PARA SALVAR O HISTÓRICO
   rl.on('SIGINT', () => {
     saveHistory(projectRoot, sessionMessages)
     console.log(chalk.gray('\n  Tchau!\n'))
@@ -106,44 +135,119 @@ export async function runChat(options: { projectRoot?: string } = {}) {
     const userInput = input.trim()
     if (!userInput) { rl.prompt(); return }
 
+    // ── /sair ────────────────────────────────────────────────────────────────
     if (userInput === '/sair') {
       saveHistory(projectRoot, sessionMessages)
       console.log(chalk.gray('  Tchau!\n'))
       process.exit(0)
     }
 
+    // ── /limpar ───────────────────────────────────────────────────────────────
     if (userInput === '/limpar') {
-      sessionMessages.length = 0 // Limpa a array
-      saveHistory(projectRoot, sessionMessages) // Salva vazio
-      console.log(chalk.green('  ✨ Memória apagada! Começando uma conversa do zero.\n'))
+      sessionMessages.length = 0
+      saveHistory(projectRoot, sessionMessages)
+      console.log(chalk.green('  ✨ Memória apagada!\n'))
       rl.prompt()
       return
     }
 
-    // ── MODO AUTÔNOMO (/agir) ───────────────────────────────────────────────
+    // ── /padroes ──────────────────────────────────────────────────────────────
+    // Lista os padrões salvos sem sair do chat
+    if (userInput === '/padroes') {
+      const patterns = listPatterns(projectRoot)
+      if (patterns.length === 0) {
+        console.log(chalk.gray('\n  Nenhum padrão salvo. Use: agent pattern save <nome> --file <arquivo>\n'))
+      } else {
+        console.log(chalk.bold.cyan('\n  📚 Padrões disponíveis:\n'))
+        patterns.forEach(p => {
+          const isMulti = p.files && p.files.length > 1
+          const tag = isMulti ? chalk.cyan(' [multi-arquivo]') : ''
+          const desc = p.description ? chalk.gray(` — ${p.description}`) : ''
+          console.log(chalk.white(`    • ${p.name}`) + tag + desc)
+          if (isMulti && p.files) {
+            p.files.forEach(f => console.log(chalk.gray(`        [${f.role}] ${f.sourcePath}`)))
+          }
+        })
+        console.log(chalk.gray('\n  Uso no chat: /agir --pattern <nome> <instrução>\n'))
+      }
+      rl.prompt()
+      return
+    }
 
+    // ── MODO AUTÔNOMO (/agir) ─────────────────────────────────────────────────
     if (userInput.startsWith('/agir ')) {
       rl.pause()
 
       const rawInstruction = userInput.replace(/^\/agir\s+/, '').trim()
 
-      const recentHistory = sessionMessages.slice(-6)
+      // ── Extrai --pattern se presente ───────────────────────────────────────
+      const { patternName, cleanInstruction } = parseAgirFlags(rawInstruction)
 
+      let patternBlock = ''
+
+      if (patternName) {
+        const pattern = loadPattern(patternName, projectRoot)
+
+        if (pattern) {
+          patternBlock = formatPatternForInstruction(pattern)
+
+          const isMulti = pattern.files && pattern.files.length > 1
+          console.log(chalk.green(`\n  📌 Padrão: ${chalk.white(pattern.name)}`) +
+            (isMulti ? chalk.cyan(' [multi-arquivo]') : ''))
+
+          if (isMulti && pattern.files) {
+            pattern.files.forEach(f =>
+              console.log(chalk.gray(`     • [${f.role}] ${f.sourcePath}`))
+            )
+          }
+          console.log('')
+
+        } else {
+          // Padrão não encontrado — avisa mas continua sem ele
+          console.log(chalk.yellow(`\n  ⚠️  Padrão "${patternName}" não encontrado.`))
+          const available = listPatterns(projectRoot)
+          if (available.length > 0) {
+            console.log(chalk.gray(`  Disponíveis: ${available.map(p => p.name).join(', ')}`))
+          }
+          console.log(chalk.gray('  Continuando sem padrão...\n'))
+        }
+      }
+
+      // ── Monta histórico recente para contexto ───────────────────────────────
+      const recentHistory = sessionMessages.slice(-6)
       const historyContext = recentHistory.length > 0
         ? recentHistory
-          .map(m => {
-            const role = m.role === 'user' ? 'Usuário' : 'Agente'
-            const preview = m.content.length > 300
-              ? m.content.slice(0, 300) + '...'
-              : m.content
-            return `${role}: ${preview}`
-          })
-          .join('\n')
+            .map(m => {
+              const role = m.role === 'user' ? 'Usuário' : 'Agente'
+              const preview = m.content.length > 300
+                ? m.content.slice(0, 300) + '...'
+                : m.content
+              return `${role}: ${preview}`
+            })
+            .join('\n')
         : ''
 
-      const enrichedInstruction = historyContext
-        ? `Contexto da conversa recente (use para entender o objetivo):\n${historyContext}\n\n---\n\nAção solicitada: ${rawInstruction}`
-        : rawInstruction
+      // ── Monta a instrução final ─────────────────────────────────────────────
+      // Ordem: padrão → aviso de adaptação → histórico → instrução do usuário
+      const parts: string[] = []
+
+      if (patternBlock) {
+        parts.push(patternBlock)
+        parts.push(`
+⚠️  ADAPTAÇÃO OBRIGATÓRIA:
+O padrão acima define a ESTRUTURA e a LÓGICA a seguir.
+Adapte apenas os campos, nomes de variáveis e caminhos conforme a instrução abaixo.
+NÃO reescreva do zero — leia o arquivo existente primeiro, depois edite cirurgicamente.`)
+        parts.push('---')
+      }
+
+      if (historyContext) {
+        parts.push(`Contexto da conversa recente (use para entender o objetivo):\n${historyContext}\n\n---`)
+      }
+
+      parts.push(`Ação solicitada: ${cleanInstruction}`)
+
+      const enrichedInstruction = parts.join('\n\n')
 
       const actSpinner = ora('Pensando e agindo...').start()
 
@@ -187,17 +291,15 @@ export async function runChat(options: { projectRoot?: string } = {}) {
       return
     }
 
-    // ── VALIDAÇÃO DE COMANDOS INVÁLIDOS ─────────────────────────────────────
-
+    // ── VALIDAÇÃO DE COMANDOS INVÁLIDOS ───────────────────────────────────────
     if (userInput.startsWith('/')) {
       console.log(chalk.yellow(`\n  ⚠️  Comando inválido: ${userInput.split(' ')[0]}`))
-      console.log(chalk.gray('  Comandos disponíveis: /agir <instrução>, /limpar ou /sair\n'))
+      console.log(chalk.gray('  Comandos: /agir, /agir --pattern <nome>, /padroes, /limpar, /sair\n'))
       rl.prompt()
       return
     }
 
-    // ── MODO BATE-PAPO NORMAL ───────────────────────────────────────────────
-
+    // ── MODO BATE-PAPO NORMAL ─────────────────────────────────────────────────
     rl.pause()
     console.log('')
 
