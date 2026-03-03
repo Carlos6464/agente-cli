@@ -8,6 +8,7 @@ import { generateCommand } from './commands/generate'
 import { runCommand } from './commands/run'
 import { chatCommand } from './commands/chat'
 import { indexCommand } from './commands/index-cmd'
+import { modelCommand} from './commands/model'
 
 
 const program = new Command()
@@ -23,6 +24,7 @@ program.addCommand(indexCommand())
 program.addCommand(generateCommand())
 program.addCommand(runCommand())
 program.addCommand(chatCommand())
+program.addCommand(modelCommand())
 
 if (!process.argv.slice(2).length) {
   program.outputHelp()

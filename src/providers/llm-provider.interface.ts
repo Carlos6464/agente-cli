@@ -64,9 +64,12 @@ export interface ILLMProvider {
 export type AIProviderName = 'ollama' | 'openai' | 'gemini' | 'claude'
 
 export interface AIConfig {
-  provider:       AIProviderName
-  apiKey?:        string
-  baseUrl?:       string
-  defaultModel:   string
-  embeddingModel: string
+  provider:           AIProviderName
+  apiKey?:            string
+  baseUrl?:           string
+  defaultModel:       string
+  embeddingModel:     string
+  // Campos adicionais para quando embedding != LLM (ex: Claude + Gemini Embeddings)
+  embeddingProvider?: 'openai' | 'gemini' | 'ollama'
+  embeddingApiKey?:   string
 }
