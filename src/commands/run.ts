@@ -1,6 +1,6 @@
 import chalk from 'chalk'
 import ora   from 'ora'
-import os    from 'os' // Importação do OS para detectar a plataforma
+import os    from 'os'
 const inquirer  = require('inquirer')
 const { spawn } = require('child_process')
 const fs        = require('fs')
@@ -9,212 +9,381 @@ import { Command }   from 'commander'
 import { loadConfig, hasConfig } from './init'
 import { ProviderFactory }       from '../providers/provider.factory'
 import { LLMMessage }            from '../providers/llm-provider.interface'
-import { retrieve }              from '../rag/retriever'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FUNÇÕES AUXILIARES
+// AGENT RUN — zero conhecimento embutido, sem RAG de código
+//
+// DECISÃO ARQUITETURAL: O RAG foi REMOVIDO desta função.
+//
+// O problema anterior: retrieve() devolvia chunks de TypeScript
+// (services, controllers) porque a query fazia match semântico com código.
+// O LLM recebia blocos de TypeScript como "contexto" e alucinava comandos
+// misturados com sintaxe de código.
+//
+// A solução: leitura DIRETA dos arquivos de configuração relevantes.
+// package.json, turbo.json, nx.json, Makefile — esses arquivos têm
+// exatamente o que o LLM precisa para descobrir comandos corretos,
+// independente da versão da ferramenta instalada.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function readProjectFiles(projectRoot: string): { name: string; content: string }[] {
-  const result: { name: string; content: string }[] = []
-  const scan = (dir: string, depth: number) => {
-    if (depth > 2) return
-    let entries; try { entries = fs.readdirSync(dir) } catch { return }
-    for (const entry of entries) {
-      if (['node_modules', '.git', 'dist'].includes(entry)) continue
-      const fullPath = path.join(dir, entry)
-      if (fs.statSync(fullPath).isDirectory()) scan(fullPath, depth + 1)
-      else if (/\.(json|yaml|yml|toml|ini|conf)$/i.test(entry) || ['Makefile', 'Dockerfile'].includes(entry)) {
-        try { result.push({ name: fullPath.replace(projectRoot + path.sep, ''), content: fs.readFileSync(fullPath, 'utf-8').slice(0, 3000) }) } catch {}
-      }
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// LÊ ARQUIVOS DE CONFIGURAÇÃO DIRETAMENTE DO DISCO
+// Sem RAG, sem embeddings — leitura direta e determinística
+// ─────────────────────────────────────────────────────────────────────────────
+
+function readConfigFilesForRun(projectRoot: string): string {
+  // Arquivos que contêm informação sobre como executar o projeto
+  // Ordenados por relevância — os primeiros têm prioridade
+  const targets = [
+    'package.json',
+    'turbo.json',
+    'nx.json',
+    'lerna.json',
+    'pnpm-workspace.yaml',
+    'pnpm-workspace.yml',
+    'Makefile',
+    '.github/workflows/ci.yml',
+    '.github/workflows/main.yml',
+    '.github/workflows/build.yml',
+  ]
+
+  const found: string[] = []
+
+  for (const file of targets) {
+    const fullPath = path.join(projectRoot, file)
+    if (!fs.existsSync(fullPath)) continue
+
+    try {
+      const content   = fs.readFileSync(fullPath, 'utf-8') as string
+      const truncated = content.slice(0, 2500)
+      found.push(`### ${file}\n\`\`\`\n${truncated}${content.length > 2500 ? '\n...(truncado)' : ''}\n\`\`\``)
+    } catch {}
   }
-  scan(projectRoot, 0); return result
-}
 
-// O "Cheat Sheet" Dinâmico que blinda qualquer monorepo
-function getMonorepoRules(monorepo: string, pm: string): string {
-  if (monorepo === 'none' || monorepo === 'unknown') return ''
-  
-  return `
-REGRAS DE EXECUÇÃO EM MONOREPO (Ativo: ${monorepo.toUpperCase()} via ${pm}):
-- NUNCA misture argumentos de escopo do gerenciador de pacotes (${pm} --filter / --workspace) com a chamada da ferramenta do monorepo.
-- Sempre use a sintaxe oficial e direta da ferramenta via npx:
-  * Turborepo: npx turbo run <comando> --filter=<nome_do_pacote>
-  * Nx: npx nx run <nome_do_pacote>:<comando>  OU  npx nx <comando> <nome_do_pacote>
-  * Lerna: npx lerna run <comando> --scope=<nome_do_pacote>
-`.trim()
+  // Também lê package.json dos workspaces para ver scripts reais dos apps
+  for (const wsDir of ['apps', 'packages', 'services', 'libs']) {
+    const wsFull = path.join(projectRoot, wsDir)
+    if (!fs.existsSync(wsFull)) continue
+
+    try {
+      for (const entry of fs.readdirSync(wsFull)) {
+        const appPkg = path.join(wsFull, entry, 'package.json')
+        if (!fs.existsSync(appPkg)) continue
+
+        try {
+          const content   = fs.readFileSync(appPkg, 'utf-8') as string
+          const truncated = content.slice(0, 1500)
+          found.push(`### ${wsDir}/${entry}/package.json\n\`\`\`\n${truncated}\n\`\`\``)
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return found.join('\n\n')
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// COMUNICAÇÃO COM O LLM (AGORA COM CONSCIÊNCIA DE SISTEMA OPERATIVO)
+// LÊ SCRIPTS DIRETOS (para o menu)
+// Scripts do package.json raiz — sem placeholders inúteis
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function askLLMForCommand(intent: string, projectRoot: string, config: any): Promise<string | null> {
-  const retrieved = await retrieve(`comando para ${intent} scripts turbo nx lerna package`, projectRoot, { topK: 5 })
-  let filesContext = retrieved.success && retrieved.contexts ? retrieved.contexts.map(c => `### ${c.filePath}\n\`\`\`\n${c.content}\n\`\`\``).join('\n\n') : ''
-  
+interface DirectScript {
+  label:   string
+  command: string
+}
+
+function readDirectScripts(projectRoot: string): DirectScript[] {
+  const scripts: DirectScript[] = []
+
+  const detectPm = (): string => {
+    if (fs.existsSync(path.join(projectRoot, 'pnpm-lock.yaml'))) return 'pnpm'
+    if (fs.existsSync(path.join(projectRoot, 'yarn.lock')))       return 'yarn'
+    if (fs.existsSync(path.join(projectRoot, 'bun.lockb')))       return 'bun'
+    return 'npm'
+  }
+
+  const pm = detectPm()
+
+  // package.json raiz — pula scripts placeholder
+  const pkgPath = path.join(projectRoot, 'package.json')
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+      for (const [name, cmd] of Object.entries(pkg.scripts || {})) {
+        const cmdStr = String(cmd)
+
+        // Pula scripts que são claramente placeholders sem utilidade
+        if (
+          cmdStr.includes('echo "Error:') ||
+          cmdStr === 'true' ||
+          cmdStr === 'false' ||
+          cmdStr === 'exit 1' ||
+          cmdStr.trim() === ''
+        ) continue
+
+        scripts.push({ label: name, command: `${pm} run ${name}` })
+      }
+    } catch {}
+  }
+
+  // Makefile — targets diretos
+  const makefilePath = path.join(projectRoot, 'Makefile')
+  if (fs.existsSync(makefilePath)) {
+    try {
+      const content  = fs.readFileSync(makefilePath, 'utf-8') as string
+      const targets  = (content.match(/^([a-zA-Z][a-zA-Z0-9_-]*):/gm) || [])
+        .map((t: string) => t.replace(':', ''))
+        .filter((t: string) => !t.startsWith('.'))
+
+      for (const name of targets) {
+        scripts.push({ label: `make ${name}`, command: `make ${name}` })
+      }
+    } catch {}
+  }
+
+  return scripts
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PEDE AO LLM O COMANDO CERTO
+// Envia os arquivos de config reais — sem RAG, sem código TypeScript no contexto
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function askLLMForCommand(
+  intent:      string,
+  projectRoot: string,
+  config:      any
+): Promise<string | null> {
+  // Leitura direta dos configs — isso é o que o LLM precisa para descobrir comandos
+  const configsContext = readConfigFilesForRun(projectRoot)
+
+  if (!configsContext) return null
+
+  // Mapeamento de nomes de pacotes para caminhos (útil para monorepos)
   let workspacesContext = ''
   if (config.profile.apps && config.profile.apps.length > 0) {
     const mappings = config.profile.apps.map((appPath: string) => {
       try {
         const pkgPath = path.join(projectRoot, appPath, 'package.json')
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
-        return `- Pasta: ${appPath} -> Nome exato do pacote: "${pkg.name}"`
-      } catch { 
-        return `- Pasta: ${appPath} -> (package.json não encontrado)` 
+        const pkg     = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+        return `- Pasta: ${appPath} → Nome do pacote: "${pkg.name}"`
+      } catch {
+        return `- Pasta: ${appPath} → (sem package.json)`
       }
     })
-    workspacesContext = `\nPACOTES DO MONOREPO (Use o "Nome exato do pacote" nos filtros da ferramenta):\n${mappings.join('\n')}\n`
+    workspacesContext = `\nPACOTES DO MONOREPO:\n${mappings.join('\n')}\n`
   }
 
-  const monorepoRules = getMonorepoRules(config.profile.monorepo, config.profile.packageManager)
-
-  // ---------------------------------------------------------------------------
-  // DETECÇÃO DE SISTEMA OPERATIVO
-  // ---------------------------------------------------------------------------
-  const isWindows = process.platform === 'win32';
-  const osName = isWindows ? 'Windows (PowerShell)' : 'Linux/Mac (Bash)';
-
-  const fileCreationRule = isWindows
-    ? `3. PARA CRIAR ARQUIVOS NO WINDOWS (PowerShell):
-   Use New-Item para criar pastas e arquivos. Use Set-Content com Here-Strings (@" ... "@) para inserir o código.
-   Atenção: A aspa dupla de fechamento "@ DEVE ficar no início absoluto da linha!
-   Exemplo Correto:
-   New-Item -ItemType Directory -Force -Path "app/models" | Out-Null
-   Set-Content -Path "app/models/anexo_model.py" -Value @"
-from sqlalchemy import Column
-"@`
-    : `3. PARA CRIAR ARQUIVOS NO LINUX/MAC (Bash):
-   Use mkdir -p para pastas e cat com EOF para arquivos.
-   Exemplo Correto:
-   mkdir -p app/models
-   cat << 'EOF' > app/models/anexo_model.py
-from sqlalchemy import Column
-EOF`;
+  // Detecção de SO para gerar comandos compatíveis
+  const isWindows = process.platform === 'win32'
+  const osHint    = isWindows ? 'Windows (PowerShell)' : 'Linux/Mac (Bash)'
 
   const messages: LLMMessage[] = [
-    { 
-      role: 'system', 
-      content: `Você é um Engenheiro de Software Sênior, expert em terminal ${osName} e dev de arquiteturas escaláveis.
-Arquitetura atual: ${config.profile.architecturalSummary || 'Desconhecida'}.
-${workspacesContext}
-
-REGRAS ESTRITAS E OBRIGATÓRIAS DE TERMINAL:
-1. Você DEVE gerar APENAS comandos válidos nativos para ${osName}.
-2. NUNCA invente ferramentas que não existem (NÃO use 'create-file', 'append-file', 'write', etc).
-${fileCreationRule}
-4. PARA MÚLTIPLOS ARQUIVOS OU COMANDOS: Escreva os comandos sequencialmente linha por linha.
-5. Responda APENAS com o código puro do terminal, sem formatação markdown (sem envolver em \`\`\`), sem explicações de texto.
-
-${monorepoRules}` 
+    {
+      role: 'system',
+      content:
+        `Você descobre comandos de terminal lendo arquivos de configuração de projetos. ` +
+        `SO atual: ${osHint}. ` +
+        `Arquitetura: ${config.profile.architecturalSummary || 'Não disponível'}. ` +
+        `${workspacesContext}\n` +
+        `REGRAS:\n` +
+        `1. Responda APENAS com o comando exato. Sem explicações, sem markdown.\n` +
+        `2. Baseie-se SOMENTE nos arquivos fornecidos — não invente comandos.\n` +
+        `3. Se não conseguir determinar o comando pelos arquivos, responda: UNKNOWN\n` +
+        `4. Para monorepos, use o comando da ferramenta diretamente (ex: npx turbo run test --filter=@pkg/name)`
     },
-    { 
-      role: 'user', 
-      content: `Arquivos relevantes lidos do projeto via RAG:\n${filesContext}\n\nEscreva APENAS o script de terminal (${osName}) para a seguinte ação (linhas separadas sequenciais): ${intent}` 
+    {
+      role: 'user',
+      content:
+        `Arquivos de configuração do projeto:\n${configsContext}\n\n` +
+        `Com base nesses arquivos, qual é o comando exato para: ${intent}`
     }
   ]
-  
+
   try {
     const result = await ProviderFactory.create(config.ai).complete(messages, { temperature: 0.1 })
     if (!result.success || !result.content) return null
-    
+
     let cmd = result.content.trim()
-    
-    const codeBlockMatch = cmd.match(/```[a-z]*\n([\s\S]+?)\n```/i) || cmd.match(/```([\s\S]+?)```/i)
-    if (codeBlockMatch) {
-        cmd = codeBlockMatch[1].trim()
-    } else {
-        cmd = cmd.replace(/`/g, '').trim()
-        if (cmd.toLowerCase().startsWith('bash\n')) cmd = cmd.substring(5).trim()
-        if (cmd.toLowerCase().startsWith('sh\n')) cmd = cmd.substring(3).trim()
-        if (cmd.toLowerCase().startsWith('powershell\n')) cmd = cmd.substring(10).trim()
-    }
-    
+
+    // Remove markdown se o LLM ignorou a instrução
+    const codeBlock = cmd.match(/```[a-z]*\n?([\s\S]+?)\n?```/i)
+    if (codeBlock) cmd = codeBlock[1].trim()
+
+    cmd = cmd.replace(/^`+|`+$/g, '').trim()
+
+    if (cmd === 'UNKNOWN' || cmd.length === 0 || cmd.length > 500) return null
     return cmd
-  } catch { return null }
+
+  } catch {
+    return null
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EXECUÇÃO PRINCIPAL DO COMANDO RUN
+// ANALISA ERRO COM LLM
+// Usa os configs reais para contextualizar o erro — sem RAG de código
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function analyzeError(
+  command:     string,
+  projectRoot: string,
+  config:      any
+): Promise<void> {
+  const spinner       = ora('Analisando o erro...').start()
+  const configContext = readConfigFilesForRun(projectRoot)
+
+  try {
+    const messages: LLMMessage[] = [
+      {
+        role: 'system',
+        content: 'Você analisa erros de terminal e sugere correções. Seja direto e específico.'
+      },
+      {
+        role: 'user',
+        content:
+          `Projeto: ${config.profile.projectName}\n` +
+          `Arquitetura: ${config.profile.architecturalSummary || 'Não disponível'}\n\n` +
+          `Arquivos de configuração:\n${configContext}\n\n` +
+          `Comando que falhou: "${command}"\n\n` +
+          `Analise o provável erro e sugira como corrigir.`
+      }
+    ]
+
+    const result = await ProviderFactory.create(config.ai).complete(messages, { temperature: 0.1 })
+    spinner.stop()
+
+    if (result.success && result.content) {
+      console.log(chalk.bold('\n  💡 Análise e Correção:\n'))
+      console.log(chalk.white('  ' + result.content.replace(/\n/g, '\n  ')))
+      console.log('')
+    }
+  } catch (err) {
+    spinner.fail(`Erro na análise: ${(err as Error).message}`)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXECUÇÃO PRINCIPAL
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runRun(options: { projectRoot?: string } = {}) {
   const projectRoot = options.projectRoot || process.cwd()
+
   if (!hasConfig(projectRoot)) {
     console.log(chalk.red('  ❌ Projeto não inicializado. Execute primeiro: agent init\n'))
     process.exit(1)
   }
-  
+
   const config = loadConfig(projectRoot)!
 
-  const directScripts: { label: string; command: string }[] = []
-  const pkgPath = path.join(projectRoot, 'package.json')
-  if (fs.existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
-      const pm = config.profile.packageManager || 'npm'
-      for (const name of Object.keys(pkg.scripts || {})) directScripts.push({ label: name, command: `${pm} run ${name}` })
-    } catch {}
-  }
+  const directScripts = readDirectScripts(projectRoot)
 
   console.log(chalk.bold.cyan('\n  🔧 Agent Run\n'))
+  console.log(chalk.gray(`  ${directScripts.length} script(s) direto(s) disponível(eis)\n`))
+
+  const choices = [
+    ...directScripts.map(s => ({ name: s.label, value: s.command })),
+    new inquirer.Separator(),
+    {
+      name:  chalk.cyan('💡 Descrever o que quero fazer (LLM descobre o comando lendo os configs)'),
+      value: '__describe__'
+    },
+    { name: '✏️  Digitar manualmente', value: '__manual__' }
+  ]
+
   const { selected } = await inquirer.prompt([{
-    type: 'list', name: 'selected', message: 'O que executar?',
-    choices: [...directScripts.map(s => ({ name: s.label, value: s.command })), new inquirer.Separator(), { name: '💡 Descrever o que quer fazer (LLM descobre)', value: '__describe__' }]
+    type:     'list',
+    name:     'selected',
+    message:  'O que executar?',
+    choices,
+    pageSize: 20
   }])
 
-  let finalCommand = selected
-  if (selected === '__describe__') {
-    const { intent } = await inquirer.prompt([{ type: 'input', name: 'intent', message: 'Descreva a ação que deseja realizar:' }])
-    const spinner = ora('Analisando arquitetura e contextos via RAG...').start()
-    const cmd = await askLLMForCommand(intent, projectRoot, config)
+  let finalCommand = ''
+
+  if (selected === '__manual__') {
+    const { cmd } = await inquirer.prompt([{
+      type:     'input',
+      name:     'cmd',
+      message:  'Comando:',
+      validate: (v: string) => v.trim().length > 0 || 'Não pode ser vazio'
+    }])
+    finalCommand = cmd.trim()
+
+  } else if (selected === '__describe__') {
+    const { intent } = await inquirer.prompt([{
+      type:     'input',
+      name:     'intent',
+      message:  'Descreva o que quer fazer:',
+      validate: (v: string) => v.trim().length > 0 || 'Descreva a intenção'
+    }])
+
+    const spinner = ora('Lendo configurações do projeto e descobrindo o comando...').start()
+    const cmd     = await askLLMForCommand(intent.trim(), projectRoot, config)
     spinner.stop()
-    
-    if (cmd) { 
-      console.log(chalk.green(`  Comando descoberto (${process.platform === 'win32' ? 'PowerShell' : 'Bash'}):\n${chalk.white(cmd)}`))
-      finalCommand = cmd 
-    } else { 
-      console.log(chalk.yellow('\n  ⚠️ Não consegui gerar o comando automaticamente.'))
-      finalCommand = (await inquirer.prompt([{ type: 'input', name: 'm', message: 'Digite o comando manualmente:' }])).m 
+
+    if (cmd) {
+      console.log(chalk.green(`\n  Comando descoberto: ${chalk.white(cmd)}\n`))
+      finalCommand = cmd
+    } else {
+      console.log(chalk.yellow('\n  ⚠️  Não consegui determinar o comando automaticamente.'))
+      const { manual } = await inquirer.prompt([{
+        type:     'input',
+        name:     'manual',
+        message:  'Digite manualmente:',
+        validate: (v: string) => v.trim().length > 0 || 'Não pode ser vazio'
+      }])
+      finalCommand = manual.trim()
     }
+
+  } else {
+    finalCommand = selected
   }
 
-  const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message: `Executar o comando acima?`, default: true }])
+  // ── Confirma e executa ────────────────────────────────────────────────────
+
+  console.log('')
+  console.log(chalk.bold('  Comando:'))
+  console.log(chalk.cyan(`  $ ${finalCommand}\n`))
+
+  const { ok } = await inquirer.prompt([{
+    type: 'confirm', name: 'ok', message: 'Executar?', default: true
+  }])
+
   if (!ok) {
-    console.log(chalk.gray('  Cancelado.\n'))
+    console.log(chalk.gray('\n  Cancelado.\n'))
     process.exit(0)
   }
 
   console.log(chalk.gray('  ' + '─'.repeat(50)))
-  
-  // ---------------------------------------------------------------------------
-  // O SEGREDO DA EXECUÇÃO CROSS-PLATFORM: Configuração Dinâmica da Shell
-  // ---------------------------------------------------------------------------
-  const shellConfig = process.platform === 'win32' ? 'powershell.exe' : true;
-  
-  const exitCode = await new Promise(res => { 
+
+  const shellConfig = process.platform === 'win32' ? 'powershell.exe' : true
+
+  const exitCode = await new Promise<number>(resolve => {
     spawn(finalCommand, [], { cwd: projectRoot, stdio: 'inherit', shell: shellConfig })
-      .on('close', res)
-      .on('error', () => res(1)) 
+      .on('close', (code: number) => resolve(code || 0))
+      .on('error', () => resolve(1))
   })
+
   console.log(chalk.gray('  ' + '─'.repeat(50) + '\n'))
-  
-  if (exitCode !== 0 && (await inquirer.prompt([{ type: 'confirm', name: 'a', message: 'Analisar erro com a IA?', default: true }])).a) {
-    const spinner = ora('Analisando o erro...').start()
-    const result = await ProviderFactory.create(config.ai).complete([
-      { role: 'system', content: `Você é um desenvolvedor corrigindo um erro em um projeto ${config.profile.architecture}. Analise a falha de terminal e diga o que fazer para corrigir.` }, 
-      { role: 'user', content: `O comando falhou: ${finalCommand}` }
-    ])
-    spinner.stop()
-    if (result.success) console.log(chalk.white(`\n  💡 Análise e Correção:\n  ${result.content}\n`))
-  } else if (exitCode === 0) {
+
+  if (exitCode !== 0) {
+    console.log(chalk.red(`  ❌ Falhou (código ${exitCode})\n`))
+
+    const { analyze } = await inquirer.prompt([{
+      type: 'confirm', name: 'analyze', message: 'Analisar erro com a IA?', default: true
+    }])
+
+    if (analyze) await analyzeError(finalCommand, projectRoot, config)
+
+  } else {
     console.log(chalk.green('  ✅ Concluído!\n'))
   }
 }
 
 export function runCommand(): Command {
   return new Command('run')
-    .description('Executa tarefas gerando e rodando comandos (ex: criar CRUDs)')
+    .description('Executa tarefas do projeto — LLM descobre comandos lendo os configs reais')
     .action(async () => await runRun())
 }
