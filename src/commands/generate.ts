@@ -6,12 +6,14 @@ import { Command } from 'commander'
 import { loadConfig, hasConfig } from './init'
 import { runAgent, AgentStep } from '../core/agent/agent-core'
 import { indexFile } from '../rag/indexer'
+import { loadPattern, listPatterns, PatternEntry } from './pattern'
 
 export async function runGenerate(options: {
   tipo: string
   nome: string
   app?: string
   context?: string
+  usePattern?: string
   projectRoot?: string
   yes?: boolean
 }) {
@@ -36,6 +38,62 @@ export async function runGenerate(options: {
 
   const config = loadConfig(projectRoot)!
 
+  // ── Resolve o padrão solicitado (--use-pattern) ───────────────────────────
+
+  let resolvedPattern: PatternEntry | null = null
+
+  if (options.usePattern) {
+    resolvedPattern = loadPattern(options.usePattern, projectRoot)
+
+    if (!resolvedPattern) {
+      // Padrão não encontrado — lista os disponíveis e pergunta o que fazer
+      const available = listPatterns(projectRoot)
+
+      console.log(chalk.red(`  ❌ Padrão "${options.usePattern}" não encontrado.\n`))
+
+      if (available.length > 0) {
+        console.log(chalk.yellow('  Padrões disponíveis no projeto:'))
+        available.forEach(p => {
+          const desc = p.description ? chalk.gray(` — ${p.description}`) : ''
+          console.log(chalk.white(`    • ${p.name}`) + desc)
+        })
+        console.log('')
+
+        const { chosenPattern } = await inquirer.prompt([{
+          type:    'list',
+          name:    'chosenPattern',
+          message: 'Usar um dos padrões existentes?',
+          choices: [
+            ...available.map(p => ({ name: p.name + (p.description ? ` (${p.description})` : ''), value: p.name })),
+            { name: 'Continuar sem padrão', value: '__none__' }
+          ]
+        }])
+
+        if (chosenPattern !== '__none__') {
+          resolvedPattern = loadPattern(chosenPattern, projectRoot)
+        }
+      } else {
+        console.log(chalk.gray('  Nenhum padrão salvo ainda.'))
+        console.log(chalk.gray('  Use: agent pattern save <nome> --file <arquivo>\n'))
+
+        const { continueWithout } = await inquirer.prompt([{
+          type:    'confirm',
+          name:    'continueWithout',
+          message: 'Continuar sem padrão?',
+          default: true
+        }])
+        if (!continueWithout) process.exit(0)
+      }
+    }
+
+    if (resolvedPattern) {
+      console.log(chalk.green(`  📌 Padrão carregado: ${chalk.white(resolvedPattern.name)}`))
+      console.log(chalk.gray(`     Referência: ${resolvedPattern.sourceFile} (${resolvedPattern.content.split('\n').length} linhas)\n`))
+    }
+  }
+
+  // ── Monta referências do examplePaths (comportamento original) ────────────
+
   const exemplosFound = config.profile.examplePaths
     ? Object.entries(config.profile.examplePaths)
         .map(([k, v]) => `  - Exemplo de ${k}: ${v}`)
@@ -46,7 +104,13 @@ export async function runGenerate(options: {
     || config.profile.examplePaths?.[tipo.replace('-', '')]
     || null
 
-  const instruction = buildInstruction(tipo, nome, app, context || null, exemploDoTipo, exemplosFound)
+  const instruction = buildInstruction(
+    tipo, nome, app,
+    context || null,
+    exemploDoTipo,
+    exemplosFound,
+    resolvedPattern   // ← NOVO: padrão explícito tem prioridade máxima
+  )
 
   console.log(chalk.gray(`  Instrução preparada para o Agente...\n`))
 
@@ -62,11 +126,11 @@ export async function runGenerate(options: {
     maxSteps: 25,
     onStep: (step: AgentStep) => {
       const labels: Record<string, string> = {
-        list_dir: 'Explorando estrutura...',
-        read_file: 'Lendo arquivo de referência...',
+        list_dir:    'Explorando estrutura...',
+        read_file:   'Lendo arquivo de referência...',
         search_code: 'Buscando padrões existentes...',
-        write_file: 'Salvando arquivo...',
-        finish: 'Finalizando...'
+        write_file:  'Salvando arquivo...',
+        finish:      'Finalizando...'
       }
 
       if (step.type === 'tool_call') {
@@ -111,12 +175,12 @@ export async function runGenerate(options: {
     console.log('\n' + chalk.gray('  ' + result.response.replace(/\n/g, '\n  ')) + '\n')
   }
 
-  // Reindexação
+  // ── Reindexação ───────────────────────────────────────────────────────────
   let shouldReindex = yes
   if (!yes && allFiles.length > 0) {
     const { confirm } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'confirm',
+      type:    'confirm',
+      name:    'confirm',
       message: `Reindexar ${allFiles.length} arquivo(s) na IA?`,
       default: true
     }])
@@ -134,17 +198,53 @@ export async function runGenerate(options: {
   console.log('')
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BUILD INSTRUCTION
+//
+// Hierarquia de referências (da mais para a menos autoritativa):
+//   1. --use-pattern  → padrão explícito aprovado por você (prioridade MÁXIMA)
+//   2. examplePaths   → arquivos detectados automaticamente pelo Stack Detector
+//   3. --context      → campos, regras de negócio, especificações
+// ─────────────────────────────────────────────────────────────────────────────
+
 function buildInstruction(
-  tipo: string,
-  nome: string,
-  app: string | undefined,
-  context: string | null,
-  exemploDoTipo: string | null,
-  todosExemplos: string | null
+  tipo:           string,
+  nome:           string,
+  app:            string | undefined,
+  context:        string | null,
+  exemploDoTipo:  string | null,
+  todosExemplos:  string | null,
+  pattern:        PatternEntry | null     // NOVO
 ): string {
   const partes: string[] = []
 
   partes.push(`Objetivo: Criar um(a) ${tipo} chamado(a) "${nome}"${app ? ` no workspace/app "${app}"` : ''}.`)
+
+  // ── 1. PADRÃO EXPLÍCITO (prioridade máxima) ───────────────────────────────
+  // Quando o usuário passou --use-pattern, esse bloco substitui qualquer
+  // busca por referência. O LLM não deve inventar — deve copiar e adaptar.
+
+  if (pattern) {
+    partes.push(`
+⚠️  PADRÃO OBRIGATÓRIO — MÁXIMA PRIORIDADE:
+O usuário selecionou explicitamente o padrão "${pattern.name}" como referência.
+${pattern.description ? `Descrição: ${pattern.description}` : ''}
+Arquivo de origem: ${pattern.sourceFile}
+
+Este é o código aprovado que você DEVE seguir para estrutura, imports, estilo e lógica:
+
+\`\`\`
+${pattern.content}
+\`\`\`
+
+REGRAS ao usar este padrão:
+- Copie a estrutura, imports e convenções EXATAMENTE como estão acima.
+- Adapte apenas: nomes de classes/funções para "${nome}", campos específicos do domínio.
+- NÃO substitua bibliotecas, ORMs, frameworks ou estilos que você vê no padrão.
+- NÃO use padrões genéricos do seu treinamento — use o que está acima.`)
+  }
+
+  // ── 2. CONTEXTO / ESPECIFICAÇÃO ───────────────────────────────────────────
 
   if (context) {
     const tipoNorm = tipo.toLowerCase()
@@ -155,28 +255,39 @@ function buildInstruction(
     } else if (['service', 'serviço', 'use-case', 'usecase'].some(t => tipoNorm.includes(t))) {
       partes.push(`\nESPECIFICAÇÃO DO SERVICE/USE-CASE:\n${context}\n\nImplemente a lógica de negócio conforme especificado.`)
     } else if (['module', 'módulo'].some(t => tipoNorm.includes(t))) {
-      partes.push(`\nESPECIFICAÇÃO DO MÓDULO COMPLETO:\n${context}\n\nCrie todos os arquivos necessários para o módulo (model, service, etc) com base nestes campos.`)
+      partes.push(`\nESPECIFICAÇÃO DO MÓDULO COMPLETO:\n${context}\n\nCrie todos os arquivos necessários para o módulo com base nestes campos.`)
     } else {
       partes.push(`\nCONTEXTO ADICIONAL:\n${context}`)
     }
   }
 
-  if (exemploDoTipo) {
-    partes.push(`\nETAPA OBRIGATÓRIA 1 — LEIA A REFERÊNCIA DIRETA:\nUse read_file no arquivo: ${exemploDoTipo}\nMemorize: imports, decorators, estilo de nomenclatura e estrutura.`)
-  } else {
-    partes.push(`\nETAPA OBRIGATÓRIA 1 — ENCONTRE E LEIA UMA REFERÊNCIA:\nUse list_dir e search_code para achar um exemplo de "${tipo}". Depois use read_file no mais relevante.`)
-  }
+  // ── 3. REFERÊNCIAS DO PROJETO (quando não há padrão explícito) ────────────
 
-  if (todosExemplos) {
-    partes.push(`\nOutros arquivos de referência:\n${todosExemplos}`)
+  if (!pattern) {
+    if (exemploDoTipo) {
+      partes.push(`\nETAPA OBRIGATÓRIA 1 — LEIA A REFERÊNCIA DIRETA:\nUse read_file no arquivo: ${exemploDoTipo}\nMemorize: imports, decorators, estilo de nomenclatura e estrutura.`)
+    } else {
+      partes.push(`\nETAPA OBRIGATÓRIA 1 — ENCONTRE E LEIA UMA REFERÊNCIA:\nUse list_dir e search_code para achar um exemplo de "${tipo}". Depois use read_file no mais relevante.`)
+    }
+
+    if (todosExemplos) {
+      partes.push(`\nOutros arquivos de referência:\n${todosExemplos}`)
+    }
+  } else {
+    // Com padrão explícito, ainda pedimos verificação de localização
+    partes.push(`\nETAPA OBRIGATÓRIA 1 — O padrão já foi fornecido acima. Use read_file APENAS para confirmar o local correto onde o arquivo deve ser criado.`)
   }
 
   partes.push(`\nETAPA 2 — LOCAL CORRETO: Use list_dir para confirmar onde o arquivo deve ser criado seguindo o padrão do projeto.`)
-  partes.push(`\nETAPA 3 — CRIE O(S) ARQUIVO(S): Use write_file com o código completo. Imite fielmente os padrões de imports e estrutura da referência.`)
+  partes.push(`\nETAPA 3 — CRIE O(S) ARQUIVO(S): Use write_file com o código completo. ${pattern ? 'Adapte o PADRÃO OBRIGATÓRIO acima para o novo contexto.' : 'Imite fielmente os padrões de imports e estrutura da referência.'}`)
   partes.push(`\nETAPA 4 — FINALIZE: Use finish com os caminhos dos arquivos criados.`)
 
   return partes.join('\n')
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMANDO
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function generateCommand(): Command {
   const cmd = new Command('generate')
@@ -187,14 +298,16 @@ export function generateCommand(): Command {
     .argument('<nome>', 'Nome do artefato (ex: UserProfile)')
     .option('--app <app>', 'App ou workspace alvo')
     .option('--context <ctx>', 'Campos, relacionamentos ou regras de negócio')
+    .option('--use-pattern <nome>', 'Usa um padrão salvo como referência obrigatória (ver: agent pattern list)')
     .option('-y, --yes', 'Pula confirmações')
     .action(async (tipo: string, nome: string, options: any) => {
       await runGenerate({
         tipo,
         nome,
-        app: options.app,
-        context: options.context,
-        yes: options.yes
+        app:        options.app,
+        context:    options.context,
+        usePattern: options.usePattern,
+        yes:        options.yes
       })
     })
 

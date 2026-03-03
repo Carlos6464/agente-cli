@@ -2,14 +2,14 @@
 
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { newCommand } from './commands/new'
-import { initCommand } from './commands/init'
+import { newCommand }      from './commands/new'
+import { initCommand }     from './commands/init'
 import { generateCommand } from './commands/generate'
-import { runCommand } from './commands/run'
-import { chatCommand } from './commands/chat'
-import { indexCommand } from './commands/index-cmd'
-import { modelCommand} from './commands/model'
-
+import { runCommand }      from './commands/run'
+import { chatCommand }     from './commands/chat'
+import { indexCommand }    from './commands/index-cmd'
+import { modelCommand }    from './commands/model'
+import { patternCommand }  from './commands/pattern'
 
 const program = new Command()
 
@@ -25,6 +25,7 @@ program.addCommand(generateCommand())
 program.addCommand(runCommand())
 program.addCommand(chatCommand())
 program.addCommand(modelCommand())
+program.addCommand(patternCommand())
 
 if (!process.argv.slice(2).length) {
   program.outputHelp()
